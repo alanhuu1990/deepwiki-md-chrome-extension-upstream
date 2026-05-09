@@ -4,7 +4,7 @@
   window.__deepwikiVersion = __v;
 
   // Debug flag to control verbose logging (set to false in production)
-  const DEBUG_MODE = true; // Hardcoded to true for debugging, or set to false for production
+  const DEBUG_MODE = false; // Hardcoded to true for debugging, or set to false for production
 
   // Security check: Only allow local file access in debug mode or for test pages
   // For Devin.ai, we want to be permissive to ensure it runs
