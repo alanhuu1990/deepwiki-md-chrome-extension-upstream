@@ -252,20 +252,25 @@
             };
           });
 
-          // Filter out pages that strictly don't belong to the current project path
-          // For Devin, we calculate a Wiki Base URL (project root) and should filter by that.
-          // For generic sites, we might stick to currentPathPrefix but it's risky for siblings.
-
+          // Filter out pages that strictly don't belong to the current project.
+          // The prefix MUST be the project root, not the current pathname — otherwise
+          // starting batch from a sub-page (e.g. /microsoft/vscode/1-overview) would
+          // filter out every sibling page in the sidebar.
           let filterPrefix = window.location.origin + window.location.pathname;
 
-          // If we are on Devin and detected a wiki base, use it
           if (hostname.includes('devin.ai')) {
+            // Devin wiki base: /org/[org]/wiki/[user]/[project]
             const pathParts = window.location.pathname.split('/');
             const wikiIndex = pathParts.indexOf('wiki');
-            // Capture up to project name: /org/[org]/wiki/[user]/[project]
             if (wikiIndex !== -1 && pathParts[wikiIndex + 2]) {
               const basePath = pathParts.slice(0, wikiIndex + 3).join('/');
               filterPrefix = window.location.origin + basePath;
+            }
+          } else {
+            // DeepWiki (and other generic wiki hosts): project root is /{org}/{repo}.
+            const pathParts = window.location.pathname.split('/').filter(p => p.length > 0);
+            if (pathParts.length >= 2) {
+              filterPrefix = `${window.location.origin}/${pathParts[0]}/${pathParts[1]}`;
             }
           }
 
@@ -466,35 +471,531 @@
     });
   }
 
-  // Helper: Extract lines of text from an element, handling tspans and other children
-  function extractLinesFromTextElement(element) {
-    const lines = [];
-    let textExtractedFromChildren = false;
+  // === Mermaid flowchart SVG → text conversion ===
+  // Targets DeepWiki's mermaid v10+ flowchart-v2 output where:
+  //   - nodes are <g class="node" id="flowchart-{name}-{index}">
+  //   - edge paths are <path id="L_{source}_{target}_{index}">
+  //   - edge labels link to paths via inner <g data-id="L_..."> (no geometric matching needed)
+  //   - text lives in foreignObject > .nodeLabel/.edgeLabel > <p> with <br> for newlines
 
-    element.childNodes.forEach(child => {
-      if (child.nodeType === Node.ELEMENT_NODE) {
-        const tagName = child.tagName.toUpperCase();
-        if (['TSPAN', 'DIV', 'P', 'SPAN'].includes(tagName)) {
-          const t = child.textContent.trim();
-          if (t) {
-            lines.push(t);
-            textExtractedFromChildren = true;
-          }
-        }
-      } else if (child.nodeType === Node.TEXT_NODE) {
-        const t = child.textContent.trim();
-        if (t) {
-          lines.push(t);
-          textExtractedFromChildren = true;
+  // "flowchart-base-0" → "base"; "flowchart-my-node-3" → "my-node"
+  function parseNodeId(svgId) {
+    return svgId.replace(/^flowchart-/, '').replace(/-\d+$/, '');
+  }
+
+  // Split a "{source}_{target}" string, disambiguating with known node ids
+  // when names themselves may contain underscores.
+  function splitEdgeIdAtKnownNodes(stripped, knownNodeIds) {
+    for (let i = 1; i < stripped.length; i++) {
+      if (stripped[i] === '_') {
+        const source = stripped.slice(0, i);
+        const target = stripped.slice(i + 1);
+        if (knownNodeIds.has(source) && knownNodeIds.has(target)) {
+          return { source, target };
         }
       }
+    }
+    const idx = stripped.indexOf('_');
+    if (idx > 0) {
+      return { source: stripped.slice(0, idx), target: stripped.slice(idx + 1) };
+    }
+    return null;
+  }
+
+  // Flowchart edge id: "L_main_renderer_0"
+  function parseEdgeId(edgeId, knownNodeIds) {
+    const stripped = edgeId.replace(/^L_/, '').replace(/_\d+$/, '');
+    return splitEdgeIdAtKnownNodes(stripped, knownNodeIds);
+  }
+
+  // Class diagram edge id: "id_IViewModel_ViewModel_1"
+  function parseClassEdgeId(edgeId, knownNodeIds) {
+    const stripped = edgeId.replace(/^id_/, '').replace(/_\d+$/, '');
+    return splitEdgeIdAtKnownNodes(stripped, knownNodeIds);
+  }
+
+  // "classId-IViewModel-0" -> "IViewModel"
+  function parseClassNodeId(svgId) {
+    return svgId.replace(/^classId-/, '').replace(/-\d+$/, '');
+  }
+
+  // Extract label text from a node/edge .label foreignObject, preserving <br>.
+  // Returns empty string if label is absent or empty.
+  function extractMermaidLabelText(labelHostEl) {
+    if (!labelHostEl) return '';
+    const fo = labelHostEl.querySelector('foreignObject');
+    const html = fo ? fo.innerHTML : labelHostEl.innerHTML;
+    if (!html) return '';
+    // Operate on innerHTML so behavior is consistent across SVG XHTML namespacing
+    // (Chrome and jsdom handle querySelector('br') inside foreignObject differently).
+    const BR_SENTINEL = '__MD_BR__';
+    return html
+      .replace(/<br\s*\/?>/gi, BR_SENTINEL)
+      .replace(/<[^>]+>/g, ' ')
+      .replace(/&nbsp;/g, ' ')
+      .replace(/&amp;/g, '&')
+      .replace(/&lt;/g, '<')
+      .replace(/&gt;/g, '>')
+      .replace(/&quot;/g, '"')
+      .replace(/[ \t]+/g, ' ')
+      .split(BR_SENTINEL)
+      .map(s => s.trim())
+      .filter(s => s.length > 0)
+      .join('<br>');
+  }
+
+  // Escape characters that would break a mermaid `["..."]` node label.
+  function escapeMermaidLabel(text) {
+    return text
+      .replace(/"/g, '#quot;')
+      .replace(/\[/g, '#91;')
+      .replace(/\]/g, '#93;');
+  }
+
+  // Escape characters problematic inside a quoted edge label `|"..."|`.
+  // Only need to escape characters that close the quoted string or pipe delimiter.
+  function escapeMermaidEdgeLabel(text) {
+    return text
+      .replace(/"/g, '#quot;')
+      .replace(/\|/g, '#124;');
+  }
+
+  // Parse "translate(x, y)" or "translate(x y)" from an SVG transform attribute.
+  function parseTranslate(transform) {
+    if (!transform) return { x: 0, y: 0 };
+    const m = transform.match(/translate\(\s*(-?[\d.]+)\s*[,\s]\s*(-?[\d.]+)\s*\)/);
+    return m ? { x: parseFloat(m[1]), y: parseFloat(m[2]) } : { x: 0, y: 0 };
+  }
+
+  // Parse cluster (subgraph) elements: id, label, bounding box from <rect>.
+  function parseClusters(svg) {
+    const clusters = [];
+    svg.querySelectorAll('g.cluster').forEach(el => {
+      const id = el.getAttribute('id');
+      if (!id) return;
+      const rect = el.querySelector(':scope > rect') || el.querySelector('rect');
+      if (!rect) return;
+      const x = parseFloat(rect.getAttribute('x')) || 0;
+      const y = parseFloat(rect.getAttribute('y')) || 0;
+      const w = parseFloat(rect.getAttribute('width')) || 0;
+      const h = parseFloat(rect.getAttribute('height')) || 0;
+      const labelHost = el.querySelector('.cluster-label') || el.querySelector('.label');
+      const label = extractMermaidLabelText(labelHost);
+      clusters.push({ id, label, x, y, w, h, area: w * h, parentId: null });
+    });
+    return clusters;
+  }
+
+  // For each cluster, find smallest strictly-larger cluster that fully contains its bbox.
+  function buildClusterHierarchy(clusters) {
+    for (const c of clusters) {
+      let bestParent = null;
+      for (const other of clusters) {
+        if (other === c || other.area <= c.area) continue;
+        const contains =
+          other.x <= c.x &&
+          other.y <= c.y &&
+          other.x + other.w >= c.x + c.w &&
+          other.y + other.h >= c.y + c.h;
+        if (contains && (!bestParent || other.area < bestParent.area)) {
+          bestParent = other;
+        }
+      }
+      c.parentId = bestParent ? bestParent.id : null;
+    }
+  }
+
+  // Find the smallest cluster whose bbox contains the node center.
+  function findContainingCluster(node, clusters) {
+    let best = null;
+    for (const c of clusters) {
+      if (
+        c.x <= node.x && node.x <= c.x + c.w &&
+        c.y <= node.y && node.y <= c.y + c.h
+      ) {
+        if (!best || c.area < best.area) best = c;
+      }
+    }
+    return best;
+  }
+
+  function convertFlowchartSvgToMermaidText(svg) {
+    // --- Parse nodes ---
+    const nodeElements = svg.querySelectorAll('g.node[id^="flowchart-"]');
+    if (nodeElements.length === 0) return '';
+
+    const nodes = new Map(); // mermaid id -> { label, x, y, declOrder, clusterId }
+    let order = 0;
+    nodeElements.forEach(el => {
+      const rawId = el.getAttribute('id');
+      const id = parseNodeId(rawId);
+      if (!id || nodes.has(id)) return;
+      const { x, y } = parseTranslate(el.getAttribute('transform'));
+      const labelHost = el.querySelector('.nodeLabel') || el.querySelector('.label');
+      const label = extractMermaidLabelText(labelHost);
+      nodes.set(id, { label, x, y, declOrder: order++, clusterId: null });
     });
 
-    if (!textExtractedFromChildren) {
-      const t = element.textContent.trim();
-      if (t) lines.push(t);
+    // --- Parse clusters and assign nodes to them ---
+    const clusters = parseClusters(svg);
+    buildClusterHierarchy(clusters);
+    for (const [, node] of nodes) {
+      const c = findContainingCluster(node, clusters);
+      node.clusterId = c ? c.id : null;
     }
-    return lines;
+
+    // --- Infer direction from layout (use SVG viewBox; fall back to node spread) ---
+    let direction = 'TD';
+    const viewBox = svg.getAttribute('viewBox');
+    if (viewBox) {
+      const parts = viewBox.split(/[\s,]+/).map(parseFloat);
+      if (parts.length === 4 && parts[2] > 0 && parts[3] > 0) {
+        // Wide SVGs are typically rendered LR by mermaid; tall ones TD.
+        direction = parts[2] > parts[3] * 1.5 ? 'LR' : 'TD';
+      }
+    } else {
+      const xs = Array.from(nodes.values()).map(n => n.x);
+      const ys = Array.from(nodes.values()).map(n => n.y);
+      const xRange = Math.max(...xs) - Math.min(...xs);
+      const yRange = Math.max(...ys) - Math.min(...ys);
+      direction = xRange > yRange ? 'LR' : 'TD';
+    }
+
+    // --- Parse edge labels (keyed by path id via data-id) ---
+    const edgeLabels = new Map();
+    svg.querySelectorAll('g.edgeLabels g.edgeLabel').forEach(el => {
+      const inner = el.querySelector('[data-id]');
+      if (!inner) return;
+      const dataId = inner.getAttribute('data-id');
+      const text = extractMermaidLabelText(inner);
+      if (text) edgeLabels.set(dataId, text);
+    });
+
+    // --- Parse edges ---
+    const knownIds = new Set(nodes.keys());
+    const edges = [];
+    svg.querySelectorAll('g.edgePaths path[id^="L_"]').forEach(path => {
+      const id = path.getAttribute('id');
+      const parsed = parseEdgeId(id, knownIds);
+      if (!parsed) return;
+      const hasStart = !!path.getAttribute('marker-start');
+      const hasEnd = !!path.getAttribute('marker-end');
+      edges.push({
+        source: parsed.source,
+        target: parsed.target,
+        label: edgeLabels.get(id) || '',
+        bidirectional: hasStart && hasEnd
+      });
+    });
+
+    if (DEBUG_MODE) {
+      console.log(`Flowchart: ${nodes.size} nodes, ${edges.length} edges, ${clusters.length} clusters, direction=${direction}`);
+    }
+
+    // --- Build mermaid text ---
+    const renderNode = (n, indent) => {
+      if (n.label) return `${indent}${n.id}["${escapeMermaidLabel(n.label)}"]\n`;
+      return `${indent}${n.id}\n`;
+    };
+
+    // Group nodes by clusterId for fast lookup
+    const nodesByCluster = new Map(); // clusterId|null -> nodes[]
+    for (const [id, info] of nodes) {
+      const key = info.clusterId || '';
+      if (!nodesByCluster.has(key)) nodesByCluster.set(key, []);
+      nodesByCluster.get(key).push({ id, ...info });
+    }
+    const clustersByParent = new Map(); // parentId|null -> clusters[]
+    for (const c of clusters) {
+      const key = c.parentId || '';
+      if (!clustersByParent.has(key)) clustersByParent.set(key, []);
+      clustersByParent.get(key).push(c);
+    }
+
+    const renderCluster = (cluster, indent) => {
+      const inner = indent + '    ';
+      const labelPart =
+        cluster.label && cluster.label !== cluster.id
+          ? ` ["${escapeMermaidLabel(cluster.label)}"]`
+          : '';
+      let s = `${indent}subgraph ${cluster.id}${labelPart}\n`;
+      for (const n of (nodesByCluster.get(cluster.id) || [])) {
+        s += renderNode(n, inner);
+      }
+      for (const child of (clustersByParent.get(cluster.id) || [])) {
+        s += renderCluster(child, inner);
+      }
+      s += `${indent}end\n`;
+      return s;
+    };
+
+    let out = `flowchart ${direction}\n`;
+    // Top-level nodes (not in any cluster)
+    for (const n of (nodesByCluster.get('') || [])) {
+      out += renderNode(n, '    ');
+    }
+    // Top-level clusters
+    for (const c of (clustersByParent.get('') || [])) {
+      out += renderCluster(c, '    ');
+    }
+    // Edges (always at top level; mermaid handles cross-subgraph edges)
+    for (const e of edges) {
+      const arrow = e.bidirectional ? '<-->' : '-->';
+      if (e.label) {
+        // Wrap edge label in double quotes so parens / pipes / brackets in the label
+        // don't get parsed as node-shape syntax (e.g., "show()" → mermaid "PS" error).
+        out += `    ${e.source} ${arrow}|"${escapeMermaidEdgeLabel(e.label)}"| ${e.target}\n`;
+      } else {
+        out += `    ${e.source} ${arrow} ${e.target}\n`;
+      }
+    }
+    return out;
+  }
+
+  // === Mermaid class diagram SVG -> text conversion ===
+
+  // Extract a single-line text label (member or method) from a class node's .label group.
+  // Normalizes mermaid's rendered ": :" sequence (e.g. "+foo() : : Type") back to ": ".
+  function extractMermaidLineText(labelEl) {
+    const text = extractMermaidLabelText(labelEl);
+    return text
+      .replace(/<br>/g, ' ')
+      .replace(/\s*:\s*:\s*/g, ' : ')
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+
+  // Extract { name, annotation, members[], methods[] } from a class node element.
+  function extractClassNodeData(el) {
+    const titleEl = el.querySelector('.label-group .label') || el.querySelector('.classTitle');
+    const name = titleEl ? extractMermaidLabelText(titleEl) : '';
+
+    let annotation = '';
+    const annotationLabel = el.querySelector('.annotation-group .label');
+    if (annotationLabel) {
+      annotation = extractMermaidLabelText(annotationLabel)
+        .replace(/^«/, '')   // strip leading guillemet
+        .replace(/»$/, '')   // strip trailing guillemet
+        .replace(/^<<|>>$/g, '')
+        .trim();
+    }
+
+    const members = [];
+    const membersGroup = el.querySelector('.members-group');
+    if (membersGroup) {
+      membersGroup.querySelectorAll(':scope > .label').forEach(memberEl => {
+        const text = extractMermaidLineText(memberEl);
+        if (text) members.push(text);
+      });
+    }
+
+    const methods = [];
+    const methodsGroup = el.querySelector('.methods-group');
+    if (methodsGroup) {
+      methodsGroup.querySelectorAll(':scope > .label').forEach(methodEl => {
+        const text = extractMermaidLineText(methodEl);
+        if (text) methods.push(text);
+      });
+    }
+
+    return { name, annotation, members, methods };
+  }
+
+  // Determine the mermaid relationship arrow from a path's marker URLs and class.
+  // Returns a string like "<|--", "*--", "<|..", or "--" (plain association).
+  function inferClassRelation(path) {
+    const start = path.getAttribute('marker-start') || '';
+    const end = path.getAttribute('marker-end') || '';
+    const cls = path.getAttribute('class') || '';
+    const dashed = /(edge-pattern-dashed|edge-pattern-dotted|dashed-line|dotted-line)/.test(cls);
+
+    const markerType = (url) => {
+      const m = url.match(/class-(\w+?)(?:Start|End)\b/);
+      return m ? m[1] : null;
+    };
+
+    const sourceHead = (type) => {
+      switch (type) {
+        case 'extension': return '<|';
+        case 'composition': return '*';
+        case 'aggregation': return 'o';
+        case 'dependency': return '<';
+        default: return '';
+      }
+    };
+    const targetHead = (type) => {
+      switch (type) {
+        case 'extension': return '|>';
+        case 'composition': return '*';
+        case 'aggregation': return 'o';
+        case 'dependency': return '>';
+        default: return '';
+      }
+    };
+
+    const left = sourceHead(markerType(start));
+    const right = targetHead(markerType(end));
+    const line = dashed ? '..' : '--';
+    return `${left}${line}${right}`;
+  }
+
+  function convertClassDiagramSvgToMermaidText(svg) {
+    const nodeElements = svg.querySelectorAll('g.node[id^="classId-"]');
+    if (nodeElements.length === 0) return '';
+
+    const nodes = new Map(); // class name -> { name, annotation, members[], methods[] }
+    nodeElements.forEach(el => {
+      const id = parseClassNodeId(el.getAttribute('id') || '');
+      if (!id || nodes.has(id)) return;
+      nodes.set(id, extractClassNodeData(el));
+    });
+
+    // Edge labels by data-id (same convention as flowchart)
+    const edgeLabels = new Map();
+    svg.querySelectorAll('g.edgeLabels g.edgeLabel').forEach(el => {
+      const inner = el.querySelector('[data-id]');
+      if (!inner) return;
+      const dataId = inner.getAttribute('data-id');
+      const text = extractMermaidLabelText(inner);
+      if (text) edgeLabels.set(dataId, text);
+    });
+
+    const knownIds = new Set(nodes.keys());
+    const edges = [];
+    svg.querySelectorAll('g.edgePaths path[id^="id_"]').forEach(path => {
+      const id = path.getAttribute('id');
+      const parsed = parseClassEdgeId(id, knownIds);
+      if (!parsed) return;
+      edges.push({
+        source: parsed.source,
+        target: parsed.target,
+        arrow: inferClassRelation(path),
+        label: edgeLabels.get(id) || ''
+      });
+    });
+
+    if (DEBUG_MODE) {
+      console.log(`Class diagram: ${nodes.size} classes, ${edges.length} relations`);
+    }
+
+    let out = 'classDiagram\n';
+    for (const [id, data] of nodes) {
+      const className = data.name || id;
+      const hasBody = data.annotation || data.members.length > 0 || data.methods.length > 0;
+      if (!hasBody) {
+        out += `    class ${className}\n`;
+        continue;
+      }
+      out += `    class ${className} {\n`;
+      if (data.annotation) out += `        <<${data.annotation}>>\n`;
+      for (const m of data.members) out += `        ${m}\n`;
+      for (const m of data.methods) out += `        ${m}\n`;
+      out += `    }\n`;
+    }
+    for (const e of edges) {
+      const arrow = e.arrow || '--';
+      if (e.label) {
+        out += `    ${e.source} ${arrow} ${e.target} : ${e.label}\n`;
+      } else {
+        out += `    ${e.source} ${arrow} ${e.target}\n`;
+      }
+    }
+    return out;
+  }
+
+  // Returns a mermaid code block string, or a placeholder, or empty string if not handled.
+  function convertSvgToMarkdown(svgElement) {
+    const ariaRole = svgElement.getAttribute('aria-roledescription') || '';
+    const svgClass = svgElement.getAttribute('class') || '';
+    const isFlowchart = ariaRole.includes('flowchart') || svgClass.includes('flowchart');
+    const isClass = ariaRole === 'class' || svgClass.includes('classDiagram');
+
+    if (isFlowchart) {
+      try {
+        const code = convertFlowchartSvgToMermaidText(svgElement);
+        if (code) return `\n\`\`\`mermaid\n${code}\`\`\`\n`;
+      } catch (err) {
+        if (DEBUG_MODE) console.error('Flowchart conversion failed:', err);
+      }
+      return '\n[Flowchart Diagram]\n';
+    }
+
+    if (isClass) {
+      try {
+        const code = convertClassDiagramSvgToMermaidText(svgElement);
+        if (code) return `\n\`\`\`mermaid\n${code}\`\`\`\n`;
+      } catch (err) {
+        if (DEBUG_MODE) console.error('Class diagram conversion failed:', err);
+      }
+      return '\n[Class Diagram]\n';
+    }
+
+    // Other diagram types (sequence/state) not yet supported — drop silently.
+    return '';
+  }
+
+  // Convert an HTML <table> to a GitHub-flavored Markdown table.
+  // Cell content is normalized: newlines collapsed to spaces, pipes escaped.
+  function convertTableToMarkdown(table) {
+    const extractCells = (tr) => {
+      const cells = [];
+      Array.from(tr.children).forEach(cell => {
+        const tag = (cell.tagName || '').toLowerCase();
+        if (tag !== 'th' && tag !== 'td') return;
+        let content = '';
+        cell.childNodes.forEach(child => {
+          content += processNode(child);
+        });
+        content = content
+          .replace(/\s*\n\s*/g, ' ')
+          .replace(/\|/g, '\\|')
+          .replace(/\s+/g, ' ')
+          .trim();
+        cells.push(content);
+      });
+      return cells;
+    };
+
+    const headerRows = [];
+    const bodyRows = [];
+
+    const thead = table.querySelector(':scope > thead');
+    if (thead) {
+      thead.querySelectorAll(':scope > tr').forEach(tr => headerRows.push(extractCells(tr)));
+    }
+    const tbody = table.querySelector(':scope > tbody');
+    if (tbody) {
+      tbody.querySelectorAll(':scope > tr').forEach(tr => bodyRows.push(extractCells(tr)));
+    }
+    // Loose <tr> directly under <table> (no thead/tbody)
+    table.querySelectorAll(':scope > tr').forEach(tr => {
+      if (headerRows.length === 0) headerRows.push(extractCells(tr));
+      else bodyRows.push(extractCells(tr));
+    });
+
+    if (headerRows.length === 0 && bodyRows.length === 0) return '';
+    // No explicit header? Promote first body row.
+    if (headerRows.length === 0) headerRows.push(bodyRows.shift());
+
+    const colCount = Math.max(
+      0,
+      ...headerRows.map(r => r.length),
+      ...bodyRows.map(r => r.length)
+    );
+    if (colCount === 0) return '';
+
+    const pad = (row) => {
+      const r = row.slice();
+      while (r.length < colCount) r.push('');
+      return r;
+    };
+
+    let out = '\n';
+    for (const r of headerRows) out += '| ' + pad(r).join(' | ') + ' |\n';
+    out += '| ' + Array(colCount).fill('---').join(' | ') + ' |\n';
+    for (const r of bodyRows) out += '| ' + pad(r).join(' | ') + ' |\n';
+    out += '\n';
+    return out;
   }
 
   // Helper function to process a node and return Markdown
@@ -530,13 +1031,49 @@
 
     const tagName = element.tagName.toLowerCase();
 
-    // Ignore specific UI elements like buttons and SVGs
-    if (tagName === "button" || tagName === "svg" || tagName === "path") {
+    // Ignore UI buttons and elements that should never produce markdown output.
+    // <script> contains Next.js RSC payloads / inline JS; <style> contains CSS;
+    // <noscript> / <template> / <head> have no visible content for our purposes.
+    if (tagName === "button" || tagName === "script" || tagName === "style" ||
+        tagName === "noscript" || tagName === "template" || tagName === "head" ||
+        tagName === "meta" || tagName === "link") {
       return "";
     }
 
-    // Ignore elements hidden via Tailwind classes
+    // SVG: convert mermaid flowcharts to fenced mermaid blocks; drop other SVGs.
+    // Match by tagName OR namespace as a defensive fallback (SVG inside HTML
+    // should always have lowercase "svg", but guard against weird re-injection).
+    const isSvgRoot = tagName === "svg" ||
+      (element.namespaceURI === 'http://www.w3.org/2000/svg' && !element.parentNode?.namespaceURI?.includes('svg'));
+    if (isSvgRoot) {
+      return convertSvgToMarkdown(element);
+    }
+    // Inside an SVG (descendant elements) - drop to avoid leaking foreignObject text
+    // when convertSvgToMarkdown failed to run on the root for any reason.
+    if (element.namespaceURI === 'http://www.w3.org/2000/svg') {
+      return "";
+    }
+
+    // Tables: convert wholesale to GFM markdown table.
+    if (tagName === "table") {
+      return convertTableToMarkdown(element);
+    }
+
     const classList = Array.from(element.classList || []);
+
+    // Mermaid container element with embedded source (rare on DeepWiki, but handle it).
+    if (classList.some(cls => cls === 'mermaid' || cls.includes('mermaid'))) {
+      const originalCode =
+        element.getAttribute('data-src') ||
+        element.getAttribute('data-mermaid') ||
+        element.getAttribute('data-mermaid-src');
+      if (originalCode) {
+        return `\n\`\`\`mermaid\n${originalCode}\n\`\`\`\n`;
+      }
+      // No embedded source: fall through so any nested <svg> child is processed below.
+    }
+
+    // Ignore elements hidden via Tailwind classes
     if (classList.some(cls => ["sr-only", "invisible", "hidden"].includes(cls))) {
       return "";
     }
@@ -587,20 +1124,30 @@
 
     // Code Blocks (Pre/Code)
     if (tagName === "pre") {
-      const codeElement = element.querySelector("code");
-      let codeText = "";
-      let language = "";
-
+      // Standard <pre><code> code block.
+      const codeElement = element.querySelector(":scope > code") || element.querySelector("code");
       if (codeElement) {
-        codeText = codeElement.innerText; // Use innerText to preserve formatting
-        // Try to get language class
+        const codeText = codeElement.innerText || codeElement.textContent || "";
+        let language = "";
         const displayClass = Array.from(codeElement.classList).find(c => c.startsWith('language-'));
         if (displayClass) language = displayClass.replace('language-', '');
-      } else {
-        codeText = element.innerText;
+        return `\n\`\`\`${language}\n${codeText}\n\`\`\`\n`;
       }
 
-      return `\n\`\`\`${language}\n${codeText}\n\`\`\`\n`;
+      // <pre> wraps rich content (e.g. DeepWiki's diagram block:
+      // <pre class="has-[div]:bg-transparent..."><div ...><svg.flowchart></svg></div></pre>).
+      // Recurse so nested handlers (SVG converter, table converter) process them
+      // instead of falling through to innerText (which would render SVG label text).
+      if (element.children.length > 0) {
+        let content = "";
+        element.childNodes.forEach((child) => {
+          content += processNode(child);
+        });
+        return content;
+      }
+
+      // Plain <pre> with only text content.
+      return `\n\`\`\`\n${element.innerText || element.textContent || ""}\n\`\`\`\n`;
     }
 
     // Inline Code

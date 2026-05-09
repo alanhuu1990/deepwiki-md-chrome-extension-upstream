@@ -1,7 +1,7 @@
 // Shared utility functions for the extension
 
 // Debug flag to control verbose logging (set to false in production)
-const DEBUG_MODE = false;
+const DEBUG_MODE = true;
 
 /**
  * Sanitizes a string to be used as a filename
