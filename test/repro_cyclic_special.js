@@ -35,14 +35,17 @@ console.log('=== Output ===');
 console.log(out);
 
 console.log('=== Checks ===');
-const selfLoopLines = out.split('\n').filter(l => l.includes('SeatMapHandlers') && l.includes('-->'));
+const selfLoopLines = out.split('\n').filter(l => /SeatMapHandlers\b.*SeatMapHandlers/.test(l));
 const checks = [
-  ['SeatMapHandlers node declared',          out.includes('SeatMapHandlers[')],
-  ['Self-loop edge present',                  out.includes('SeatMapHandlers -->|') && out.includes('SeatMapHandlers\n')],
-  ['Self-loop is SeatMapHandlers --> SeatMapHandlers', /SeatMapHandlers\s*-->\|.*\|\s*SeatMapHandlers/.test(out)],
-  ['Label "auto-reset at 50 SOLD" preserved', out.includes('auto-reset at 50 SOLD')],
-  ['Label "ctx.objectSendClient" preserved',  out.includes('ctx.objectSendClient')],
-  ['Only 1 self-loop emitted (not 3)',        selfLoopLines.length === 1],
+  ['SeatMapHandlers node declared',           out.includes('SeatMapHandlers[')],
+  ['Self-loop uses dotted arrow -.->',         /SeatMapHandlers\s+-\.->\|.*\|\s*SeatMapHandlers/.test(out)],
+  ['Self-loop is NOT solid -->',               !/SeatMapHandlers\s+-->\|.*\|\s*SeatMapHandlers/.test(out)],
+  ['Label "auto-reset at 50 SOLD" preserved',  out.includes('auto-reset at 50 SOLD')],
+  ['Label "ctx.objectSendClient" preserved',   out.includes('ctx.objectSendClient')],
+  ['Only 1 self-loop emitted (not 3)',         selfLoopLines.length === 1],
+  // Regression: regular edge styles also detected from class.
+  ['Solid edge A --> B',                       /A\s+-->\|"solid edge"\|\s*B/.test(out)],
+  ['Dotted edge B -.-> C',                     /B\s+-\.->\|"dotted edge"\|\s*C/.test(out)],
 ];
 
 let allPass = true;
