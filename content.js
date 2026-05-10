@@ -682,6 +682,16 @@
       if (text) edgeLabels.set(dataId, text);
     });
 
+    // Detect mermaid edge style from the path's class list.
+    // Returns 'dotted' | 'thick' | 'solid'. (Flowchart has no native dashed arrow;
+    // edge-pattern-dashed maps to dotted as the closest visual match.)
+    const getEdgeStyle = (path) => {
+      const cls = path.getAttribute('class') || '';
+      if (/edge-pattern-(dotted|dashed)/.test(cls)) return 'dotted';
+      if (/edge-thickness-thick/.test(cls)) return 'thick';
+      return 'solid';
+    };
+
     // --- Parse edges ---
     const knownIds = new Set(nodes.keys());
     const edges = [];
@@ -695,25 +705,34 @@
         source: parsed.source,
         target: parsed.target,
         label: edgeLabels.get(id) || '',
-        bidirectional: hasStart && hasEnd
+        bidirectional: hasStart && hasEnd,
+        style: getEdgeStyle(path)
       });
     });
 
     // Self-loops are rendered as 3 path segments with ids "{node}-cyclic-special-{1|mid|2}".
     // The label sits on the -mid segment. Collapse each group into one self-loop edge.
-    const cyclicNodes = new Set();
+    // Style is taken from any segment carrying a non-solid pattern.
+    const cyclicGroups = new Map(); // nodeId -> style
     svg.querySelectorAll('g.edgePaths path[id*="cyclic-special"]').forEach(path => {
       const m = (path.getAttribute('id') || '').match(/^(.+)-cyclic-special-(?:1|2|mid)$/);
       if (!m) return;
       const nodeId = m[1];
-      if (knownIds.has(nodeId)) cyclicNodes.add(nodeId);
+      if (!knownIds.has(nodeId)) return;
+      const style = getEdgeStyle(path);
+      const prev = cyclicGroups.get(nodeId);
+      // Prefer a non-solid style if any segment carries it.
+      if (!prev || (prev === 'solid' && style !== 'solid')) {
+        cyclicGroups.set(nodeId, style);
+      }
     });
-    for (const nodeId of cyclicNodes) {
+    for (const [nodeId, style] of cyclicGroups) {
       edges.push({
         source: nodeId,
         target: nodeId,
         label: edgeLabels.get(`${nodeId}-cyclic-special-mid`) || '',
-        bidirectional: false
+        bidirectional: false,
+        style
       });
     }
 
@@ -771,8 +790,13 @@
       out += renderCluster(c, '    ');
     }
     // Edges (always at top level; mermaid handles cross-subgraph edges)
+    const arrowFor = (style, bidir) => {
+      if (style === 'dotted') return bidir ? '<-.->' : '-.->';
+      if (style === 'thick')  return bidir ? '<==>'  : '==>';
+      return bidir ? '<-->' : '-->';
+    };
     for (const e of edges) {
-      const arrow = e.bidirectional ? '<-->' : '-->';
+      const arrow = arrowFor(e.style || 'solid', e.bidirectional);
       if (e.label) {
         // Wrap edge label in double quotes so parens / pipes / brackets in the label
         // don't get parsed as node-shape syntax (e.g., "show()" → mermaid "PS" error).
