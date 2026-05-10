@@ -568,11 +568,20 @@
   }
 
   // Parse cluster (subgraph) elements: id, label, bounding box from <rect>.
+  // Replace any character outside [A-Za-z0-9_] with `_` so the result is a valid
+  // mermaid identifier (subgraph/node ids choke on parens, dashes, dots, spaces).
+  function sanitizeMermaidId(id) {
+    if (!id) return '';
+    const cleaned = String(id).replace(/[^A-Za-z0-9_]/g, '_').replace(/_+/g, '_');
+    return cleaned || 'cluster';
+  }
+
   function parseClusters(svg) {
     const clusters = [];
+    let fallbackCounter = 0;
     svg.querySelectorAll('g.cluster').forEach(el => {
-      const id = el.getAttribute('id');
-      if (!id) return;
+      const rawId = el.getAttribute('id');
+      if (!rawId) return;
       const rect = el.querySelector(':scope > rect') || el.querySelector('rect');
       if (!rect) return;
       const x = parseFloat(rect.getAttribute('x')) || 0;
@@ -581,7 +590,9 @@
       const h = parseFloat(rect.getAttribute('height')) || 0;
       const labelHost = el.querySelector('.cluster-label') || el.querySelector('.label');
       const label = extractMermaidLabelText(labelHost);
-      clusters.push({ id, label, x, y, w, h, area: w * h, parentId: null });
+      let id = sanitizeMermaidId(rawId);
+      if (id === 'cluster') id = `cluster_${fallbackCounter++}`;
+      clusters.push({ id, rawId, label, x, y, w, h, area: w * h, parentId: null });
     });
     return clusters;
   }
@@ -714,9 +725,12 @@
 
     const renderCluster = (cluster, indent) => {
       const inner = indent + '    ';
+      // Prefer DOM-extracted label; fall back to the raw (unsanitized) id so callers
+      // don't lose info when the original id had to be rewritten (e.g., contained `()`).
+      const display = cluster.label || cluster.rawId || '';
       const labelPart =
-        cluster.label && cluster.label !== cluster.id
-          ? ` ["${escapeMermaidLabel(cluster.label)}"]`
+        display && display !== cluster.id
+          ? ` ["${escapeMermaidLabel(display)}"]`
           : '';
       let s = `${indent}subgraph ${cluster.id}${labelPart}\n`;
       for (const n of (nodesByCluster.get(cluster.id) || [])) {
@@ -892,12 +906,281 @@
       for (const m of data.methods) out += `        ${m}\n`;
       out += `    }\n`;
     }
+    // Edge ids strip suffixes like ".ts" from class names (mermaid sanitizes ids
+    // for the edge id), but the display label keeps them. Resolve back to the
+    // display name so `class Foo.ts` matches `Foo.ts --> Bar.ts`.
+    const displayName = (id) => {
+      const data = nodes.get(id);
+      return (data && data.name) ? data.name : id;
+    };
     for (const e of edges) {
       const arrow = e.arrow || '--';
+      const src = displayName(e.source);
+      const tgt = displayName(e.target);
       if (e.label) {
-        out += `    ${e.source} ${arrow} ${e.target} : ${e.label}\n`;
+        out += `    ${src} ${arrow} ${tgt} : ${e.label}\n`;
       } else {
-        out += `    ${e.source} ${arrow} ${e.target}\n`;
+        out += `    ${src} ${arrow} ${tgt}\n`;
+      }
+    }
+    return out;
+  }
+
+  // === Mermaid sequence diagram SVG -> text conversion ===
+
+  // Read text content from a <text> element, preferring its first <tspan> if present.
+  function readSvgText(textEl) {
+    if (!textEl) return '';
+    const tspan = textEl.querySelector('tspan');
+    const raw = tspan ? tspan.textContent : textEl.textContent;
+    return (raw || '').replace(/\s+/g, ' ').trim();
+  }
+
+  function convertSequenceDiagramSvgToMermaidText(svg) {
+    // --- Parse actors (dedupe by `name` attribute; both top + bottom rects share it) ---
+    const actorMap = new Map(); // name -> { name, label, xCenter, xLeft, xRight }
+    svg.querySelectorAll('rect.actor').forEach(rect => {
+      const name = rect.getAttribute('name');
+      if (!name || actorMap.has(name)) return;
+      const x = parseFloat(rect.getAttribute('x') || '0');
+      const w = parseFloat(rect.getAttribute('width') || '0');
+      const labelEl = rect.parentNode && rect.parentNode.querySelector('text.actor');
+      const label = readSvgText(labelEl) || name;
+      actorMap.set(name, { name, label, xLeft: x, xRight: x + w, xCenter: x + w / 2 });
+    });
+    if (actorMap.size === 0) return '';
+
+    const actors = Array.from(actorMap.values()).sort((a, b) => a.xCenter - b.xCenter);
+
+    const actorAtX = (x) => {
+      let best = null, bestD = Infinity;
+      for (const a of actors) {
+        const d = Math.abs(a.xCenter - x);
+        if (d < bestD) { bestD = d; best = a; }
+      }
+      return best;
+    };
+
+    const actorsInRange = (x1, x2) => {
+      const lo = Math.min(x1, x2);
+      const hi = Math.max(x1, x2);
+      return actors.filter(a => a.xCenter >= lo - 1 && a.xCenter <= hi + 1);
+    };
+
+    // --- Collect events (notes + messages) tagged with Y for ordering ---
+    const events = [];
+
+    svg.querySelectorAll('rect.note').forEach(rect => {
+      const x = parseFloat(rect.getAttribute('x') || '0');
+      const w = parseFloat(rect.getAttribute('width') || '0');
+      const y = parseFloat(rect.getAttribute('y') || '0');
+      const textEl = rect.parentNode && rect.parentNode.querySelector('text.noteText');
+      const text = readSvgText(textEl);
+      if (!text) return;
+      const covered = actorsInRange(x, x + w);
+      events.push({ kind: 'note', y, text, actors: covered });
+    });
+
+    // Pair each message line with the message text closest above it (text.y < line.y).
+    // Self-messages render as <path d="M x,y C ..."> (curved arrow back to same actor)
+    // instead of a straight <line>; pick up both.
+    const messageLines = [];
+    svg.querySelectorAll('line.messageLine0, line.messageLine1, path.messageLine0, path.messageLine1').forEach(el => {
+      const dashed = (el.getAttribute('class') || '').includes('messageLine1');
+      if (el.tagName.toLowerCase() === 'line') {
+        messageLines.push({
+          x1: parseFloat(el.getAttribute('x1') || '0'),
+          x2: parseFloat(el.getAttribute('x2') || '0'),
+          y: parseFloat(el.getAttribute('y1') || '0'),
+          dashed
+        });
+      } else {
+        const d = el.getAttribute('d') || '';
+        const m = d.match(/M\s*(-?[\d.]+)[\s,]+(-?[\d.]+)/);
+        if (!m) return;
+        const x = parseFloat(m[1]);
+        messageLines.push({ x1: x, x2: x, y: parseFloat(m[2]), dashed });
+      }
+    });
+    const messageTexts = [];
+    svg.querySelectorAll('text.messageText').forEach(textEl => {
+      const text = readSvgText(textEl);
+      if (text) messageTexts.push({ y: parseFloat(textEl.getAttribute('y') || '0'), text });
+    });
+    messageLines.sort((a, b) => a.y - b.y);
+    messageTexts.sort((a, b) => a.y - b.y);
+
+    const usedTextIdx = new Set();
+    messageLines.forEach(line => {
+      let bestIdx = -1, bestDelta = Infinity;
+      for (let i = 0; i < messageTexts.length; i++) {
+        if (usedTextIdx.has(i)) continue;
+        const delta = line.y - messageTexts[i].y;
+        if (delta < 0) continue;
+        if (delta < bestDelta) { bestDelta = delta; bestIdx = i; }
+      }
+      let text = '';
+      if (bestIdx >= 0) {
+        usedTextIdx.add(bestIdx);
+        text = messageTexts[bestIdx].text;
+      }
+      const source = actorAtX(line.x1);
+      const target = actorAtX(line.x2);
+      if (!source || !target) return;
+      events.push({
+        kind: 'message',
+        y: line.y,
+        source: source.name,
+        target: target.name,
+        dashed: line.dashed,
+        text
+      });
+    });
+
+    events.sort((a, b) => a.y - b.y);
+
+    if (DEBUG_MODE) {
+      console.log(`Sequence: ${actors.length} actors, ${events.length} events`);
+    }
+
+    // --- Build mermaid text ---
+    let out = 'sequenceDiagram\n';
+    for (const a of actors) {
+      if (a.label && a.label !== a.name) {
+        out += `    participant ${a.name} as ${a.label}\n`;
+      } else {
+        out += `    participant ${a.name}\n`;
+      }
+    }
+    for (const e of events) {
+      if (e.kind === 'note') {
+        if (e.actors.length === 0) continue;
+        // Mermaid `Note over` only accepts 1 or 2 actors; for wider notes
+        // (phase headers spanning the whole diagram) collapse to leftmost+rightmost.
+        let targets;
+        if (e.actors.length <= 2) {
+          targets = e.actors.map(a => a.name).join(',');
+        } else {
+          const sorted = [...e.actors].sort((a, b) => a.xCenter - b.xCenter);
+          targets = `${sorted[0].name},${sorted[sorted.length - 1].name}`;
+        }
+        out += `    Note over ${targets}: ${e.text}\n`;
+      } else {
+        const arrow = e.dashed ? '-->>' : '->>';
+        out += `    ${e.source}${arrow}${e.target}: ${e.text}\n`;
+      }
+    }
+    return out;
+  }
+
+  // === Mermaid state diagram SVG -> text conversion ===
+
+  // Decode mermaid's base64-encoded data-points attribute on edge paths.
+  // Returns [{x, y}, ...] or null on failure. Works in both browser (atob) and Node (Buffer).
+  function decodeDataPoints(b64) {
+    if (!b64) return null;
+    try {
+      let json;
+      if (typeof atob === 'function') {
+        json = atob(b64);
+      } else if (typeof Buffer !== 'undefined') {
+        json = Buffer.from(b64, 'base64').toString('utf-8');
+      } else {
+        return null;
+      }
+      const arr = JSON.parse(json);
+      return Array.isArray(arr) ? arr : null;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function convertStateDiagramSvgToMermaidText(svg) {
+    // --- Parse states ---
+    // Each state: <g class="node ..." id="state-{NAME}-{idx}" transform="translate(x, y)">
+    // Pseudo states: state-root_start-0 (circle.state-start) → mermaid `[*]`
+    const states = []; // { name, label, x, y, isPseudo }
+    svg.querySelectorAll('g.node[id^="state-"]').forEach(el => {
+      const id = el.getAttribute('id') || '';
+      const m = id.match(/^state-(.+)-(\d+)$/);
+      if (!m) return;
+      const rawName = m[1];
+      const t = parseTranslate(el.getAttribute('transform'));
+
+      if (rawName === 'root_start' || el.querySelector('circle.state-start')) {
+        states.push({ name: '[*]', label: '', x: t.x, y: t.y, isPseudo: true });
+        return;
+      }
+      if (rawName === 'root_end' || el.querySelector('circle.state-end')) {
+        states.push({ name: '[*]', label: '', x: t.x, y: t.y, isPseudo: true });
+        return;
+      }
+
+      const labelHost = el.querySelector('.nodeLabel') || el.querySelector('.label');
+      // extractMermaidLabelText may leave literal newlines from <p>multi\nline</p>;
+      // collapse all whitespace so the label fits on one mermaid line.
+      const labelText = extractMermaidLabelText(labelHost)
+        .replace(/<br>/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+      states.push({ name: rawName, label: labelText, x: t.x, y: t.y, isPseudo: false });
+    });
+    if (states.length === 0) return '';
+
+    const nearestState = (px, py) => {
+      let best = null, bestD = Infinity;
+      for (const s of states) {
+        const dx = s.x - px, dy = s.y - py;
+        const d = dx * dx + dy * dy;
+        if (d < bestD) { bestD = d; best = s; }
+      }
+      return best;
+    };
+
+    // --- Parse edges (anonymous; endpoints inferred via nearest state to data-points) ---
+    const edges = [];
+    svg.querySelectorAll('g.edgePaths path[id^="edge"]').forEach(p => {
+      const id = p.getAttribute('id');
+      const points = decodeDataPoints(p.getAttribute('data-points'));
+      if (!points || points.length < 2) return;
+      const start = points[0];
+      const end = points[points.length - 1];
+      if (typeof start.x !== 'number' || typeof end.x !== 'number') return;
+      const source = nearestState(start.x, start.y);
+      const target = nearestState(end.x, end.y);
+      if (!source || !target) return;
+      edges.push({ id, source, target });
+    });
+
+    // --- Edge labels keyed by edge id ---
+    const edgeLabels = new Map();
+    svg.querySelectorAll('g.edgeLabels g.edgeLabel g.label[data-id]').forEach(el => {
+      const dataId = el.getAttribute('data-id');
+      const text = extractMermaidLabelText(el)
+        .replace(/<br>/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+      if (text) edgeLabels.set(dataId, text);
+    });
+
+    if (DEBUG_MODE) {
+      console.log(`State diagram: ${states.length} states, ${edges.length} edges`);
+    }
+
+    // --- Build mermaid ---
+    let out = 'stateDiagram-v2\n';
+    for (const s of states) {
+      if (s.isPseudo) continue;
+      if (s.label && s.label !== s.name) {
+        out += `    state "${escapeMermaidLabel(s.label)}" as ${s.name}\n`;
+      }
+    }
+    for (const e of edges) {
+      const label = edgeLabels.get(e.id);
+      if (label) {
+        out += `    ${e.source.name} --> ${e.target.name}: ${label}\n`;
+      } else {
+        out += `    ${e.source.name} --> ${e.target.name}\n`;
       }
     }
     return out;
@@ -909,6 +1192,8 @@
     const svgClass = svgElement.getAttribute('class') || '';
     const isFlowchart = ariaRole.includes('flowchart') || svgClass.includes('flowchart');
     const isClass = ariaRole === 'class' || svgClass.includes('classDiagram');
+    const isSequence = ariaRole === 'sequence' || svgClass.includes('sequence');
+    const isState = ariaRole === 'stateDiagram' || svgClass.includes('statediagram');
 
     if (isFlowchart) {
       try {
@@ -930,7 +1215,27 @@
       return '\n[Class Diagram]\n';
     }
 
-    // Other diagram types (sequence/state) not yet supported — drop silently.
+    if (isSequence) {
+      try {
+        const code = convertSequenceDiagramSvgToMermaidText(svgElement);
+        if (code) return `\n\`\`\`mermaid\n${code}\`\`\`\n`;
+      } catch (err) {
+        if (DEBUG_MODE) console.error('Sequence diagram conversion failed:', err);
+      }
+      return '\n[Sequence Diagram]\n';
+    }
+
+    if (isState) {
+      try {
+        const code = convertStateDiagramSvgToMermaidText(svgElement);
+        if (code) return `\n\`\`\`mermaid\n${code}\`\`\`\n`;
+      } catch (err) {
+        if (DEBUG_MODE) console.error('State diagram conversion failed:', err);
+      }
+      return '\n[State Diagram]\n';
+    }
+
+    // Other diagram types not yet supported — drop silently.
     return '';
   }
 
