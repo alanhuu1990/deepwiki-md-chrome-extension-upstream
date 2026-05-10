@@ -699,6 +699,24 @@
       });
     });
 
+    // Self-loops are rendered as 3 path segments with ids "{node}-cyclic-special-{1|mid|2}".
+    // The label sits on the -mid segment. Collapse each group into one self-loop edge.
+    const cyclicNodes = new Set();
+    svg.querySelectorAll('g.edgePaths path[id*="cyclic-special"]').forEach(path => {
+      const m = (path.getAttribute('id') || '').match(/^(.+)-cyclic-special-(?:1|2|mid)$/);
+      if (!m) return;
+      const nodeId = m[1];
+      if (knownIds.has(nodeId)) cyclicNodes.add(nodeId);
+    });
+    for (const nodeId of cyclicNodes) {
+      edges.push({
+        source: nodeId,
+        target: nodeId,
+        label: edgeLabels.get(`${nodeId}-cyclic-special-mid`) || '',
+        bidirectional: false
+      });
+    }
+
     if (DEBUG_MODE) {
       console.log(`Flowchart: ${nodes.size} nodes, ${edges.length} edges, ${clusters.length} clusters, direction=${direction}`);
     }
