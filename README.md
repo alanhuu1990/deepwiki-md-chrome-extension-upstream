@@ -23,6 +23,13 @@ Use it to:
 
 **Current version:** [0.4.0](CHANGELOG.md) — see [CHANGELOG.md](CHANGELOG.md) for release notes.
 
+### Recent releases
+
+| Version | Highlights |
+|---------|------------|
+| **0.4.0** | Diagram PNG export, batch download history, reliable batch ZIP download in the service worker |
+| **0.3.0** | **Batch image download fixes** — diagram PNGs are collected per page, written into the ZIP with unique `images/` paths, and Markdown links stay in sync; batch history to re-download completed archives |
+
 ## Features
 
 ### 1. Single page download
@@ -38,9 +45,11 @@ Download every subpage listed in the sidebar as its own `.md` file, packaged in 
 
 - An auto-generated `README.md` index
 - Per-page Markdown files
-- **`images/`** — diagram PNGs (same export behavior as single-page mode)
+- **`images/`** — diagram PNGs (and SVG fallback files when PNG rasterization fails)
 
 Progress and cancel are shown in the popup while the extension navigates each page.
+
+**Batch diagram images (v0.3.0+):** Each wiki page is converted on its own, with diagrams rasterized from the live DOM before Markdown is generated. Image files use **page-specific names** (for example `images/PageTitle-diagram-1.png`) so multiple pages in one batch do not overwrite each other’s assets. The `.md` files in the ZIP reference those same paths, so viewers and static-site tools can resolve images offline. This fixes earlier batch runs where diagrams were missing, duplicated, or broken links inside the archive.
 
 ### 3. Single-file batch download
 
@@ -107,7 +116,19 @@ Supported URLs: `https://deepwiki.com/<org>/<project>/...` and Devin wiki pages 
 3. Wait for progress in the popup (use **Cancel Batch Operation** if needed)
 4. Save the ZIP when prompted
 
-If you close the save dialog without saving, use **Recent batches** → **Download** on that run instead of starting over.
+**ZIP layout (pages with diagrams):**
+
+```text
+MyWiki.zip
+├── README.md              # index of all pages
+├── Introduction.md
+├── Architecture.md
+└── images/
+    ├── Introduction-diagram-1.png
+    └── Architecture-diagram-1.png
+```
+
+If you close the save dialog without saving, use **Recent batches** → **Download** on that run instead of starting over (the stored ZIP includes the same Markdown and image files).
 
 ### Single-file batch download
 
@@ -138,7 +159,7 @@ If you close the save dialog without saving, use **Recent batches** → **Downlo
 |--------|---------|
 | **Sites** | `https://deepwiki.com/*`, `https://app.devin.ai/*` |
 | **Format** | UTF-8 Markdown (`.md`); batch ZIP uses DEFLATE |
-| **Diagrams** | PNG assets in ZIPs; base64 inline in single-file batch; Mermaid text fallback when PNG export fails |
+| **Diagrams** | Per-page PNG (or SVG) under `images/` in batch ZIPs, with paths prefixed by page title; base64 inline in single-file batch; Mermaid text fallback when export fails |
 | **Batch history** | IndexedDB (`deepwiki-batch-history`), max 5 entries, 80 MB per-entry storage cap |
 | **Permissions** | `downloads`, `tabs`, `webNavigation`, `scripting` — no `storage` permission; history uses IndexedDB |
 
@@ -167,6 +188,13 @@ If you close the save dialog without saving, use **Recent batches** → **Downlo
 - Click **Cancel Batch Operation**
 - Refresh the wiki tab and try again
 - For debugging: set `DEBUG_MODE = true` in `content.js`, reload the extension, check the page console (F12)
+
+**Diagrams missing or broken in a batch ZIP**
+
+- Use extension **v0.3.0 or later** (current **0.4.0**) — batch image packaging was fixed in that release line
+- Let each page finish rendering before the extension moves on (diagrams are captured from the DOM)
+- Unzip and confirm `images/` contains `PageName-diagram-N.png` files matching `![](images/...)` links in the `.md` files
+- If the save dialog failed, re-download the same batch from **Recent batches** rather than re-running conversion
 
 ## Roadmap
 

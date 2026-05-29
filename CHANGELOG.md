@@ -37,6 +37,10 @@ Version numbers match `manifest.json`.
 - Popup **Recent batches** section: list recent runs, re-download, remove one entry, or clear all.
 - `batchHistory.js` module loaded by the service worker; no new manifest permissions required.
 
+### Fixed
+
+- **Batch image download** — Diagram PNG/SVG assets are included in batch ZIPs with per-page `images/{pageTitle}-diagram-N.*` paths so Markdown image links match files in the archive and pages no longer clobber shared `images/diagram-*` names.
+
 ### Changed
 
 - Batch ZIP and single-file merge flows refactored into `buildZipBlob` / `buildMergedMarkdown` plus shared download helpers.
