@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 Version numbers match `manifest.json`.
 
+## [0.3.1] - 2026-05-29
+
+### Fixed
+
+- Batch ZIP download and history re-download in the service worker: use base64 data URLs instead of `URL.createObjectURL` (not available in MV3 service workers).
+
 ## [0.3.0] - 2026-05-29
 
 ### Added
@@ -31,5 +37,6 @@ Version numbers match `manifest.json`.
 - Batch conversion reliability (SPA readiness, tab message queue, Devin button index handling).
 - Mermaid flowchart, class diagram, and edge-style conversion improvements.
 
+[0.3.1]: https://github.com/philipz/deepwiki-md-chrome-extension/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/philipz/deepwiki-md-chrome-extension/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/philipz/deepwiki-md-chrome-extension/releases/tag/v0.2.1

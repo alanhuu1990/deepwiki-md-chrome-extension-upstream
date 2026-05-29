@@ -486,7 +486,7 @@ async function processSinglePage(page) {
   });
 }
 
-async function buildZipBlob() {
+async function buildZipBytes() {
   const zip = new JSZip();
   let indexContent = `# ${batchState.folderName}\n\n## Content Index\n\n`;
 
@@ -500,33 +500,41 @@ async function buildZipBlob() {
 
   zip.file('README.md', indexContent);
 
-  const blob = await zip.generateAsync({
-    type: 'blob',
+  const bytes = await zip.generateAsync({
+    type: 'uint8array',
     compression: 'DEFLATE',
     compressionOptions: { level: 6 }
   });
 
   return {
-    blob,
+    bytes,
     filename: `${batchState.folderName}.zip`
   };
 }
 
-function downloadBlob(blob, filename) {
-  const objectUrl = URL.createObjectURL(blob);
+function uint8ArrayToBase64(bytes) {
+  const chunkSize = 0x8000;
+  let binary = '';
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    const chunk = bytes.subarray(i, i + chunkSize);
+    binary += String.fromCharCode.apply(null, chunk);
+  }
+  return btoa(binary);
+}
+
+function downloadZipBytes(bytes, filename) {
+  const dataUrl = `data:application/zip;base64,${uint8ArrayToBase64(bytes)}`;
 
   return new Promise((resolve, reject) => {
     chrome.downloads.download({
-      url: objectUrl,
+      url: dataUrl,
       filename,
       saveAs: true
     }, () => {
       if (chrome.runtime.lastError) {
-        URL.revokeObjectURL(objectUrl);
         reject(new Error(chrome.runtime.lastError.message));
         return;
       }
-      setTimeout(() => URL.revokeObjectURL(objectUrl), 60000);
       resolve();
     });
   });
@@ -652,7 +660,7 @@ async function redownloadHistoryEntry(record) {
     throw new Error('Batch history entry not found.');
   }
   if (record.type === 'zip') {
-    await downloadBlob(new Blob([record.payload]), record.filename);
+    await downloadZipBytes(new Uint8Array(record.payload), record.filename);
     return;
   }
   if (record.type === 'single-md') {
@@ -697,7 +705,8 @@ async function runBatchProcessing() {
       message: `Creating ZIP with ${batchState.convertedPages.length} files...`
     });
 
-    const { blob, filename } = await buildZipBlob();
+    const { bytes, filename } = await buildZipBytes();
+    const zipBuffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
     const historyNote = await saveBatchToHistory({
       type: 'zip',
       filename,
@@ -705,9 +714,9 @@ async function runBatchProcessing() {
       pageCount: batchState.convertedPages.length,
       processed: batchState.processed,
       failed: batchState.failed,
-      payload: blob
+      payload: zipBuffer
     });
-    await downloadBlob(blob, filename);
+    await downloadZipBytes(bytes, filename);
 
     batchState.isRunning = false;
     broadcastBatchUpdate('completed', {

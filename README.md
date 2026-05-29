@@ -184,6 +184,6 @@ MIT License - see [LICENSE](LICENSE) file for details
 
 ---
 
-**Version:** See [CHANGELOG.md](CHANGELOG.md) (current: 0.3.0)
+**Version:** See [CHANGELOG.md](CHANGELOG.md) (current: 0.3.1)
 **Maintainer:** [@philipz](https://github.com/philipz)
 **Repository:** https://github.com/philipz/deepwiki-md-chrome-extension
