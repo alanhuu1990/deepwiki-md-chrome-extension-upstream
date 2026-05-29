@@ -26,10 +26,13 @@ Convert and download the current DeepWiki page as a Markdown file.
 ### 2. Batch Download (ZIP Archive)
 Download all subpages of a documentation project as individual Markdown files, packaged in a ZIP archive with an auto-generated index.
 
-### 3. Single File Batch Download ✨ NEW
+### 3. Single File Batch Download
 Merge all documentation pages into a single Markdown file for easy reading and sharing.
 
-### 4. Advanced Conversion
+### 4. Batch download history
+After a batch ZIP or single-file run completes, the extension keeps the last few results locally so you can open the popup and download again if you dismissed the save dialog (no re-conversion).
+
+### 5. Advanced Conversion
 - Preserves code blocks with syntax highlighting
 - Converts Mermaid diagrams (flowcharts, sequence diagrams, class diagrams, state diagrams)
 - Maintains document structure and formatting
@@ -165,7 +168,7 @@ Contributions are welcome! Feel free to:
 
 ## Privacy
 
-This extension does not collect, store, or transmit any personal data. All conversions happen locally in your browser.
+Conversions run locally in your browser. Completed batch downloads may be kept briefly in local IndexedDB so you can re-download them from the popup (see [Privacy Policy](PRIVACY_POLICY.md)).
 
 For complete details, see our [Privacy Policy](PRIVACY_POLICY.md).
 
@@ -181,6 +184,6 @@ MIT License - see [LICENSE](LICENSE) file for details
 
 ---
 
-**Version:** 0.1.0
+**Version:** See [CHANGELOG.md](CHANGELOG.md) (current: 0.3.0)
 **Maintainer:** [@philipz](https://github.com/philipz)
 **Repository:** https://github.com/philipz/deepwiki-md-chrome-extension

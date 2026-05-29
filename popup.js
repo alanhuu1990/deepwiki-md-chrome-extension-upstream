@@ -32,14 +32,46 @@ document.addEventListener('DOMContentLoaded', () => {
   const batchSingleFileBtn = document.getElementById('batchSingleFileBtn');
   const cancelBtn = document.getElementById('cancelBtn');
   const status = document.getElementById('status');
+  const batchHistorySection = document.getElementById('batchHistorySection');
+  const batchHistoryToggle = document.getElementById('batchHistoryToggle');
+  const batchHistoryPanel = document.getElementById('batchHistoryPanel');
+  const batchHistoryList = document.getElementById('batchHistoryList');
+  const batchHistoryClearBtn = document.getElementById('batchHistoryClearBtn');
+  let batchRunning = false;
 
   chrome.runtime.onMessage.addListener((request) => {
     if (request.action === 'batchUpdate') {
       applyBatchStatus(request);
+      if (request.type === 'completed') {
+        loadBatchHistory();
+      }
     }
   });
 
   initializeBatchStatus();
+  loadBatchHistory();
+
+  batchHistoryToggle.addEventListener('click', () => {
+    const collapsed = batchHistoryPanel.classList.toggle('collapsed');
+    batchHistoryToggle.setAttribute('aria-expanded', String(!collapsed));
+    document.getElementById('batchHistoryToggleIcon').textContent = collapsed ? '▶' : '▼';
+  });
+
+  batchHistoryClearBtn.addEventListener('click', async () => {
+    if (!confirm('Remove all saved batch downloads from history?')) {
+      return;
+    }
+    try {
+      const response = await chrome.runtime.sendMessage({ action: 'clearBatchHistory' });
+      if (!response || !response.success) {
+        throw new Error(response?.error || 'Failed to clear history.');
+      }
+      await loadBatchHistory();
+      showStatus('Batch history cleared.', 'info');
+    } catch (error) {
+      showStatus('Unable to clear history: ' + error.message, 'error');
+    }
+  });
 
   convertBtn.addEventListener('click', async () => {
     try {
@@ -172,6 +204,8 @@ document.addEventListener('DOMContentLoaded', () => {
       return;
     }
 
+    batchRunning = !!statusPayload.running;
+
     if (statusPayload.running) {
       showCancelButton(true);
       disableBatchButton(true);
@@ -179,6 +213,8 @@ document.addEventListener('DOMContentLoaded', () => {
       showCancelButton(false);
       disableBatchButton(false);
     }
+
+    setBatchHistoryActionsDisabled(batchRunning);
 
     if (statusPayload.message) {
       showStatus(statusPayload.message, statusPayload.level || 'info');
@@ -197,5 +233,136 @@ document.addEventListener('DOMContentLoaded', () => {
   function showStatus(message, type) {
     status.textContent = message;
     status.className = type;
+  }
+
+  async function loadBatchHistory() {
+    try {
+      const response = await chrome.runtime.sendMessage({ action: 'getBatchHistory' });
+      const entries = (response && response.success && response.entries) ? response.entries : [];
+      renderBatchHistory(entries);
+    } catch (error) {
+      if (typeof DEBUG_MODE !== 'undefined' && DEBUG_MODE) {
+        console.debug('Unable to load batch history:', error.message);
+      }
+      renderBatchHistory([]);
+    }
+  }
+
+  function renderBatchHistory(entries) {
+    batchHistoryList.innerHTML = '';
+
+    if (!entries.length) {
+      batchHistorySection.hidden = true;
+      return;
+    }
+
+    batchHistorySection.hidden = false;
+
+    entries.forEach(entry => {
+      const li = document.createElement('li');
+      li.className = 'batch-history-item';
+
+      const meta = document.createElement('div');
+      meta.className = 'batch-history-meta';
+
+      const label = document.createElement('div');
+      label.className = 'batch-history-label';
+      label.textContent = entry.label || entry.filename;
+      label.title = entry.filename;
+
+      const details = document.createElement('div');
+      details.className = 'batch-history-details';
+      const typeLabel = entry.type === 'single-md' ? 'MD' : 'ZIP';
+      const failedPart = entry.failed > 0 ? ` · ${entry.failed} failed` : '';
+      details.textContent = `${formatRelativeTime(entry.completedAt)} · ${typeLabel} · ${entry.pageCount} pages${failedPart} · ${formatBytes(entry.sizeBytes)}`;
+
+      meta.appendChild(label);
+      meta.appendChild(details);
+
+      const actions = document.createElement('div');
+      actions.className = 'batch-history-actions';
+
+      const downloadBtn = document.createElement('button');
+      downloadBtn.type = 'button';
+      downloadBtn.className = 'batch-history-download';
+      downloadBtn.textContent = 'Download';
+      downloadBtn.addEventListener('click', () => redownloadBatchEntry(entry.id, downloadBtn));
+
+      const removeBtn = document.createElement('button');
+      removeBtn.type = 'button';
+      removeBtn.className = 'batch-history-remove';
+      removeBtn.textContent = '×';
+      removeBtn.title = 'Remove from history';
+      removeBtn.addEventListener('click', () => deleteBatchEntry(entry.id));
+
+      actions.appendChild(downloadBtn);
+      actions.appendChild(removeBtn);
+
+      li.appendChild(meta);
+      li.appendChild(actions);
+      batchHistoryList.appendChild(li);
+    });
+
+    setBatchHistoryActionsDisabled(batchRunning);
+  }
+
+  function setBatchHistoryActionsDisabled(disabled) {
+    batchHistoryList.querySelectorAll('button').forEach(btn => {
+      btn.disabled = disabled;
+    });
+    batchHistoryClearBtn.disabled = disabled;
+  }
+
+  async function redownloadBatchEntry(id, button) {
+    try {
+      button.disabled = true;
+      showStatus('Starting download...', 'info');
+      const response = await chrome.runtime.sendMessage({ action: 'redownloadBatchHistory', id });
+      if (!response || !response.success) {
+        throw new Error(response?.error || 'Download failed.');
+      }
+      showStatus('Download started. Choose where to save the file.', 'success');
+    } catch (error) {
+      showStatus('Download failed: ' + error.message, 'error');
+    } finally {
+      if (!batchRunning) {
+        button.disabled = false;
+      }
+    }
+  }
+
+  async function deleteBatchEntry(id) {
+    try {
+      const response = await chrome.runtime.sendMessage({ action: 'deleteBatchHistoryEntry', id });
+      if (!response || !response.success) {
+        throw new Error(response?.error || 'Failed to remove entry.');
+      }
+      await loadBatchHistory();
+    } catch (error) {
+      showStatus('Unable to remove entry: ' + error.message, 'error');
+    }
+  }
+
+  function formatBytes(bytes) {
+    if (!bytes || bytes < 1024) {
+      return `${bytes || 0} B`;
+    }
+    if (bytes < 1024 * 1024) {
+      return `${(bytes / 1024).toFixed(1)} KB`;
+    }
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  }
+
+  function formatRelativeTime(isoString) {
+    const date = new Date(isoString);
+    const diffMs = Date.now() - date.getTime();
+    const diffMin = Math.floor(diffMs / 60000);
+    if (diffMin < 1) return 'just now';
+    if (diffMin < 60) return `${diffMin}m ago`;
+    const diffHr = Math.floor(diffMin / 60);
+    if (diffHr < 24) return `${diffHr}h ago`;
+    const diffDay = Math.floor(diffHr / 24);
+    if (diffDay < 7) return `${diffDay}d ago`;
+    return date.toLocaleDateString();
   }
 });

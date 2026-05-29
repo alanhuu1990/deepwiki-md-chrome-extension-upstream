@@ -64,12 +64,16 @@ The Extension includes one third-party library:
 
 ## Data Storage
 
-The Extension does not store any data:
-- No local storage is used
-- No cookies are created
-- No browser storage APIs are utilized for persistent data
+The Extension stores data locally on your device only when you complete a batch download (ZIP or single merged Markdown file):
 
-The only files created are the Markdown files you explicitly choose to download.
+- Completed batch outputs are saved in **IndexedDB** so you can re-download them from the extension popup without re-running conversion
+- Up to **5** recent batch results are kept; older entries are removed automatically
+- Archives larger than **80 MB** are not kept in history (the initial download still runs)
+- You can remove individual entries or clear all history from the popup
+- No cookies are created
+- No data is transmitted to our servers or third parties
+
+Single-page downloads are not stored in history. Aside from optional batch history, the only files created are those you explicitly choose to download via your browser’s save dialog.
 
 ## Children's Privacy
 
