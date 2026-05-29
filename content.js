@@ -121,11 +121,19 @@
 
           let markdown = ``;
           let markdownTitle = title.replace(/\s+/g, '-');
+          let assets = [];
 
           if (contentContainer) {
-            contentContainer.childNodes.forEach((child) => {
-              markdown += processNode(child);
-            });
+            const collection = await collectDiagramAssets(contentContainer, markdownTitle);
+            assets = collection.assets;
+            currentSvgPathMap = collection.svgPathMap;
+            try {
+              contentContainer.childNodes.forEach((child) => {
+                markdown += processNode(child);
+              });
+            } finally {
+              currentSvgPathMap = null;
+            }
           }
 
           markdown = markdown.trim().replace(/\n{3,}/g, "\n\n");
@@ -134,7 +142,8 @@
             success: true,
             markdown,
             markdownTitle,
-            headTitle: formattedHeadTitle
+            headTitle: formattedHeadTitle,
+            assets
           });
         } catch (error) {
           console.error("Error converting to Markdown:", error);
@@ -391,13 +400,17 @@
             readinessConfirmed = true;
           }
 
-          // 2. Fallback check for title element matching
+          // 2. Fallback check for title element matching (DeepWiki + Devin)
           if (!readinessConfirmed) {
-            const titleEl = document.querySelector('.container > div:nth-child(1) a[data-selected="true"]') ||
-              document.querySelector(".container > div:nth-child(1) h1") ||
-              document.querySelector("h1");
-            const currentTitle = titleEl ? titleEl.textContent.trim() : "";
-            if (currentTitle === targetText) {
+            const titleEl =
+              document.querySelector('.container > div:nth-child(1) a[data-selected="true"]') ||
+              document.querySelector('.container > div:nth-child(1) h1') ||
+              document.querySelector('.prose-main h1') ||
+              document.querySelector('.prose h1') ||
+              document.querySelector('article h1') ||
+              document.querySelector('h1');
+            const currentTitle = titleEl ? titleEl.textContent.trim() : '';
+            if (currentTitle === targetText || currentTitle.endsWith(targetText)) {
               readinessConfirmed = true;
             }
           }
@@ -1228,8 +1241,157 @@
     return out;
   }
 
-  // Returns a mermaid code block string, or a placeholder, or empty string if not handled.
+  // Per-conversion map from SVG element → exported image path (set during collectDiagramAssets).
+  let currentSvgPathMap = null;
+
+  function getSvgDimensions(svg) {
+    const viewBox = svg.getAttribute('viewBox');
+    if (viewBox) {
+      const parts = viewBox.trim().split(/[\s,]+/).map(Number);
+      if (parts.length === 4 && parts[2] > 0 && parts[3] > 0) {
+        return { width: parts[2], height: parts[3] };
+      }
+    }
+    const w = parseFloat(svg.getAttribute('width')) || svg.getBoundingClientRect().width || 800;
+    const h = parseFloat(svg.getAttribute('height')) || svg.getBoundingClientRect().height || 600;
+    return { width: Math.max(w, 80), height: Math.max(h, 80) };
+  }
+
+  function isDiagramSvg(svg) {
+    const ariaRole = svg.getAttribute('aria-roledescription') || '';
+    const svgClass = svg.getAttribute('class') || '';
+    const id = svg.getAttribute('id') || '';
+    const role = svg.getAttribute('role') || '';
+    return ariaRole.includes('flowchart') || svgClass.includes('flowchart') ||
+      ariaRole === 'class' || svgClass.includes('classDiagram') ||
+      ariaRole === 'sequence' || svgClass.includes('sequence') ||
+      ariaRole === 'stateDiagram' || svgClass.includes('statediagram') ||
+      id.startsWith('mermaid-') ||
+      role === 'graphics-document document';
+  }
+
+  function isRootSvg(svg) {
+    if ((svg.tagName || '').toLowerCase() !== 'svg') return false;
+    let parent = svg.parentElement;
+    while (parent) {
+      if ((parent.tagName || '').toLowerCase() === 'svg') return false;
+      parent = parent.parentElement;
+    }
+    return true;
+  }
+
+  function findDiagramSvgs(container) {
+    return Array.from(container.querySelectorAll('svg')).filter(
+      svg => isRootSvg(svg) && isDiagramSvg(svg)
+    );
+  }
+
+  function exportSvgAsSvgBase64(svg) {
+    const clone = svg.cloneNode(true);
+    if (!clone.getAttribute('xmlns')) {
+      clone.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
+    }
+    const svgString = new XMLSerializer().serializeToString(clone);
+    return btoa(unescape(encodeURIComponent(svgString)));
+  }
+
+  function exportSvgToPngBase64(svg) {
+    const clone = svg.cloneNode(true);
+    const { width, height } = getSvgDimensions(svg);
+    clone.setAttribute('width', String(width));
+    clone.setAttribute('height', String(height));
+    if (!clone.getAttribute('xmlns')) {
+      clone.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
+    }
+    const svgString = new XMLSerializer().serializeToString(clone);
+    const blob = new Blob([svgString], { type: 'image/svg+xml;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const SVG_EXPORT_TIMEOUT_MS = 10000;
+
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const finish = (fn, value) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        fn(value);
+      };
+
+      const timer = setTimeout(() => {
+        URL.revokeObjectURL(url);
+        finish(reject, new Error('SVG rasterization timed out'));
+      }, SVG_EXPORT_TIMEOUT_MS);
+
+      const img = new Image();
+      img.onload = () => {
+        try {
+          const scale = 2;
+          const maxDim = 4096;
+          const canvas = document.createElement('canvas');
+          canvas.width = Math.min(Math.ceil(width * scale), maxDim);
+          canvas.height = Math.min(Math.ceil(height * scale), maxDim);
+          const ctx = canvas.getContext('2d');
+          ctx.fillStyle = '#ffffff';
+          ctx.fillRect(0, 0, canvas.width, canvas.height);
+          ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+          URL.revokeObjectURL(url);
+          finish(resolve, canvas.toDataURL('image/png').split(',')[1]);
+        } catch (err) {
+          URL.revokeObjectURL(url);
+          finish(reject, err);
+        }
+      };
+      img.onerror = () => {
+        URL.revokeObjectURL(url);
+        finish(reject, new Error('Failed to rasterize SVG'));
+      };
+      img.src = url;
+    });
+  }
+
+  async function collectDiagramAssets(container, pageSlug) {
+    const assets = [];
+    const svgPathMap = new WeakMap();
+    const safeSlug = (pageSlug || 'page')
+      .replace(/[^\w-]/g, '-')
+      .replace(/-+/g, '-')
+      .replace(/^-|-$/g, '')
+      .toLowerCase() || 'page';
+    const svgs = findDiagramSvgs(container).slice(0, 30);
+
+    for (let i = 0; i < svgs.length; i++) {
+      const svg = svgs[i];
+      const n = i + 1;
+      try {
+        const base64 = await exportSvgToPngBase64(svg);
+        const relativePath = `images/${safeSlug}-diagram-${n}.png`;
+        assets.push({ relativePath, mimeType: 'image/png', base64 });
+        svgPathMap.set(svg, { relativePath, alt: `Diagram ${n}` });
+      } catch (err) {
+        if (DEBUG_MODE) console.error('PNG export failed, falling back to SVG:', err);
+        try {
+          const base64 = exportSvgAsSvgBase64(svg);
+          const relativePath = `images/${safeSlug}-diagram-${n}.svg`;
+          assets.push({ relativePath, mimeType: 'image/svg+xml', base64 });
+          svgPathMap.set(svg, { relativePath, alt: `Diagram ${n}` });
+        } catch (err2) {
+          if (DEBUG_MODE) console.error('SVG export also failed:', err2);
+        }
+      }
+    }
+
+    return { assets, svgPathMap };
+  }
+
+  // Returns image markdown when rasterized, else mermaid code block / placeholder / empty.
   function convertSvgToMarkdown(svgElement) {
+    if (currentSvgPathMap) {
+      const entry = currentSvgPathMap.get(svgElement);
+      if (entry) {
+        return `\n![${entry.alt}](${entry.relativePath})\n`;
+      }
+    }
+
     const ariaRole = svgElement.getAttribute('aria-roledescription') || '';
     const svgClass = svgElement.getAttribute('class') || '';
     const isFlowchart = ariaRole.includes('flowchart') || svgClass.includes('flowchart');

@@ -24,6 +24,16 @@
       <button id="cancelBtn" class="cancel" style="display: none;">Cancel Batch Operation</button>
     </div>
     <div id="status"></div>
+    <section id="batchHistorySection" class="batch-history" hidden>
+      <button type="button" id="batchHistoryToggle" class="batch-history-toggle" aria-expanded="true">
+        <span>Recent batches</span>
+        <span id="batchHistoryToggleIcon" class="batch-history-toggle-icon">▼</span>
+      </button>
+      <div id="batchHistoryPanel" class="batch-history-panel">
+        <ul id="batchHistoryList" class="batch-history-list"></ul>
+        <button type="button" id="batchHistoryClearBtn" class="batch-history-clear">Clear all</button>
+      </div>
+    </section>
   </div>
   <script src="utils.js"></script>
   <script src="popup.js"></script>

@@ -1,0 +1,57 @@
+---
+description: Git branching, commits, versioning, and pull requests for this repo
+alwaysApply: true
+---
+
+# Git workflow (deepwiki-md-chrome-extension)
+
+## Branches
+
+- **`develop`** — integration branch; all feature PRs merge here first.
+- **`main`** — release/stable; updated from `develop` when appropriate (not the default PR target).
+- **Feature branches** — create from latest `develop`:
+  - `feat/<short-description>` — new features
+  - `fix/<short-description>` — bug fixes
+  - `chore/<short-description>` — tooling, docs-only, version bumps
+
+Do not commit directly to `develop` or `main` for feature work. Use a branch and open a PR.
+
+## Commits
+
+- Use clear, imperative messages (e.g. `Add batch download history`, `Fix ZIP download in service worker`).
+- When using Cursor Agent, prefix the subject with **`[Cursor]`** (e.g. `[Cursor] Fix batch ZIP download in service worker`).
+- One logical change per commit when practical; avoid unrelated file churn.
+
+## Versioning
+
+- **Source of truth:** `manifest.json` → `"version"`.
+- On every user-facing release (or before merging a versioned PR), update:
+  1. `manifest.json` version (semver: patch for fixes, minor for features, major for breaking changes).
+  2. Root **`CHANGELOG.md`** — new dated section ([Keep a Changelog](https://keepachangelog.com/) format).
+  3. **`README.md`** footer version reference if it mentions the current version.
+- Store builds: `./build-for-store.sh` reads version from `manifest.json` → `deepwiki-md-extension-v<version>.zip`.
+
+## Pull requests
+
+- **Target branch:** `develop` (required for this project).
+- PR title: include `[Cursor]` when the work was done in Cursor.
+- PR body: Summary (what/why), Test plan (checklist), link related issues if any.
+- Use `gh pr create --base develop` after pushing the feature branch with `-u origin <branch>`.
+- Do not force-push to `develop` or `main`.
+
+## Before opening a PR
+
+```bash
+git fetch origin
+git checkout develop && git pull origin develop
+git checkout <your-feature-branch>
+git rebase origin/develop   # or merge, per team preference; resolve conflicts
+# bump version + CHANGELOG if not done yet
+git push -u origin <your-feature-branch>
+gh pr create --base develop --title "[Cursor] ..." --body "..."
+```
+
+## After merge
+
+- Delete the feature branch locally/remotely when no longer needed.
+- Reload the unpacked extension in Chrome after changes that affect `manifest.json` or service worker code.

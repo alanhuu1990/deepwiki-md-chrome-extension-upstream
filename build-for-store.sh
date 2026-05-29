@@ -22,6 +22,7 @@ cp popup.js ${TEMP_DIR}/
 cp background.js ${TEMP_DIR}/
 cp content.js ${TEMP_DIR}/
 cp utils.js ${TEMP_DIR}/
+cp batchHistory.js ${TEMP_DIR}/
 cp styles.css ${TEMP_DIR}/
 
 # 複製目錄
