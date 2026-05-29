@@ -6,6 +6,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 Version numbers match `manifest.json`.
 
+## [0.4.0] - 2026-05-29
+
+### Added
+
+- Diagram export as PNG assets in single-page and batch ZIP outputs (SVG fallback when rasterization fails).
+- **Batch download history** — persist completed ZIP and single-file batch outputs in IndexedDB; re-download from popup **Recent batches** without re-converting (max 5 entries, 80 MB cap per entry).
+- `batchHistory.js` and git-workflow Cursor rule (`.cursor/rules/git-workflow.mdc`).
+
+### Changed
+
+- Batch ZIP and single-file merge flows use service-worker-safe download helpers (base64 data URLs).
+- [PRIVACY_POLICY.md](PRIVACY_POLICY.md) updated for optional local batch history storage.
+
+### Fixed
+
+- Batch ZIP download and history re-download (`URL.createObjectURL` is unavailable in MV3 service workers).
+
 ## [0.3.1] - 2026-05-29
 
 ### Fixed
@@ -37,6 +54,7 @@ Version numbers match `manifest.json`.
 - Batch conversion reliability (SPA readiness, tab message queue, Devin button index handling).
 - Mermaid flowchart, class diagram, and edge-style conversion improvements.
 
+[0.4.0]: https://github.com/philipz/deepwiki-md-chrome-extension/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/philipz/deepwiki-md-chrome-extension/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/philipz/deepwiki-md-chrome-extension/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/philipz/deepwiki-md-chrome-extension/releases/tag/v0.2.1
