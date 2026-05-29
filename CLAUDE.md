@@ -59,6 +59,8 @@ Three message endpoints — popup ↔ background ↔ content script — coordina
 
 **Local-file execution gate (`content.js:ALLOW_SCRIPT_EXECUTION`).** Defense-in-depth on top of the URL gate: on `file://`, the content script no-ops unless the URL is a known test page or `DEBUG_MODE=true`. When this guard short-circuits, **no `ping` handler is registered** — that's intentional, so background detects the dead instance and falls through to error/re-injection paths.
 
+**Diagram export.** Before `processNode` walks the prose container, `collectDiagramAssets` rasterizes root Mermaid/diagram SVGs to PNG (SVG fallback on failure) and builds `currentSvgPathMap` so `convertSvgToMarkdown` emits `![Diagram N](images/{pageSlug}-diagram-N.png)`. Failed rasterization falls back to existing SVG→Mermaid text converters. Assets are returned in `convertToMarkdown`'s `assets[]` and packaged as follows: single-page download → mini-ZIP when assets exist; batch ZIP → `images/` inside archive; merged single-file → `inlineAssetsInMarkdown` rewrites refs to base64 data URLs.
+
 **Filenames.** ZIP mode uses page head/current title (`sanitizeFolderName`). Single-file merge: DeepWiki uses `<headTitle>[-<lastIndexedDate>].md`; Devin uses `Devin-<org>-<project>[-<lastIndexedDate>].md`. Sanitization in `sanitizeName` strips `\/:*?"<>|`, collapses whitespace and runs of `-`, and trims leading/trailing `-`. Within a single batch, `getUniqueFileName` appends `-1`, `-2`, … to deduplicate.
 
 ### Message contract (background ↔ content)
@@ -67,13 +69,14 @@ Three message endpoints — popup ↔ background ↔ content script — coordina
 |---|---|---|---|
 | `ping` | bg → cs | — | `{ pong: true }`; used by `ensureContentScript` |
 | `contentScriptReady` | cs → bg | — | Fires twice per load (sync + window.load); flushes queue |
-| `convertToMarkdown` | bg/popup → cs | — | Returns `{ success, markdown, markdownTitle, headTitle }` |
+| `convertToMarkdown` | bg/popup → cs | — | Returns `{ success, markdown, markdownTitle, headTitle, assets[] }` where each asset is `{ relativePath, mimeType, base64 }` |
 | `extractAllPages` | bg → cs | — | Wrapped in `setTimeout(…, 0)` to force async — callers rely on `return true` keeping the channel open |
 | `clickDevinButton` | bg → cs | `{ buttonText, buttonIndex }` | `buttonIndex` is authoritative; `buttonText` is fallback |
 | `pageLoaded` / `tabActivated` | bg → cs | — | Liveness pings on tab updates; cs must `sendResponse({ received: true })` |
 | `startBatch` / `startBatchSingleFile` / `cancelBatch` / `getBatchStatus` | popup → bg | `{ tabId? }` | |
 | `batchUpdate` | bg → popup | progress payload | Broadcast; popup also calls `getBatchStatus` on open to recover state |
 | `ensureContentScript` | popup → bg | `{ tabId }` | Popup delegates re-injection here instead of doing it itself |
+| `downloadPageZip` | popup → bg | `{ markdown, assets[], zipFileName, mdFileName }` | Single-page download with diagram assets; builds ZIP via JSZip |
 
 ### When editing
 

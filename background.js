@@ -2,6 +2,7 @@ importScripts('lib/jszip.min.js');
 importScripts('utils.js');
 
 const MESSAGE_TIMEOUT = 30000;
+const CONVERT_MESSAGE_TIMEOUT = 120000;
 // Delay constants for page rendering to avoid rate limiting and ensure content loads
 const PAGE_RENDER_BASE_DELAY = 3000;
 const PAGE_RENDER_JITTER = 1000;
@@ -149,13 +150,33 @@ function queueMessageForTab(tabId, message, resolve, reject) {
 
   queueItem.timeoutId = setTimeout(() => {
     queueItem.reject(new Error(`Timed out waiting for response for ${message.action}`));
-  }, MESSAGE_TIMEOUT);
+  }, getMessageTimeout(message));
 
   messageQueue[tabId].queue.push(queueItem);
 }
 
+function getMessageTimeout(message) {
+  if (message && message.action === 'convertToMarkdown') {
+    return CONVERT_MESSAGE_TIMEOUT;
+  }
+  return MESSAGE_TIMEOUT;
+}
+
+function withMessageTimeout(promise, message) {
+  const timeoutMs = getMessageTimeout(message);
+  const action = message?.action || 'message';
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => {
+      setTimeout(() => {
+        reject(new Error(`Timed out waiting for response for ${action}`));
+      }, timeoutMs);
+    })
+  ]);
+}
+
 function attemptDirectMessage(tabId, message) {
-  return new Promise((resolve, reject) => {
+  return withMessageTimeout(new Promise((resolve, reject) => {
     chrome.tabs.sendMessage(tabId, message, response => {
       const error = chrome.runtime.lastError;
       if (error) {
@@ -164,13 +185,34 @@ function attemptDirectMessage(tabId, message) {
       }
       resolve(response);
     });
-  });
+  }), message);
 }
 
 function shouldQueueForError(error) {
   if (!error || !error.message) return false;
   return error.message.includes('Receiving end does not exist') ||
     error.message.includes('Could not establish connection');
+}
+
+function waitForTabReady(tabId, timeoutMs = 20000) {
+  const entry = messageQueue[tabId];
+  if (entry && entry.isReady) {
+    return Promise.resolve();
+  }
+  return new Promise((resolve, reject) => {
+    const deadline = setTimeout(() => {
+      clearInterval(check);
+      reject(new Error('Timed out waiting for page to become ready after navigation'));
+    }, timeoutMs);
+    const check = setInterval(() => {
+      const e = messageQueue[tabId];
+      if (e && e.isReady) {
+        clearInterval(check);
+        clearTimeout(deadline);
+        resolve();
+      }
+    }, 100);
+  });
 }
 
 function sendMessageToTab(tabId, message, forceDirect = false) {
@@ -405,16 +447,21 @@ async function processSinglePage(page) {
       markTabReady(batchState.tabId);
       throw new Error(clickRes?.error || `Failed to click Devin page button for: ${page.title}`);
     }
+    await waitForTabReady(batchState.tabId);
   } else {
     await navigateToPage(batchState.tabId, page.url);
+    await waitForTabReady(batchState.tabId);
   }
 
   if (batchState.cancelRequested) return;
 
   // Wait for dynamic content to render.
-  // Increased to PAGE_RENDER_BASE_DELAY + random buffer to avoid rate limiting and ensure large pages load.
   const delay = PAGE_RENDER_BASE_DELAY + Math.random() * PAGE_RENDER_JITTER;
   await new Promise(resolve => setTimeout(resolve, delay));
+
+  broadcastBatchUpdate('processing', {
+    message: `Converting ${currentStep}/${batchState.total}: ${page.title}`
+  });
 
   const convertResponse = await sendMessageToTab(batchState.tabId, { action: 'convertToMarkdown' });
   if (!convertResponse || !convertResponse.success) {
@@ -422,7 +469,16 @@ async function processSinglePage(page) {
   }
 
   const fileName = getUniqueFileName(convertResponse.markdownTitle || page.title);
-  batchState.convertedPages.push({ title: fileName, content: convertResponse.markdown });
+  const { markdown, assets } = prefixPageAssets(
+    convertResponse.markdown,
+    convertResponse.assets || [],
+    fileName
+  );
+  batchState.convertedPages.push({
+    title: fileName,
+    content: markdown,
+    assets
+  });
   batchState.processed += 1;
   broadcastBatchUpdate('pageProcessed', {
     message: `Converted ${batchState.processed}/${batchState.total}: ${page.title}`
@@ -436,9 +492,74 @@ async function createZipArchive() {
   batchState.convertedPages.forEach(page => {
     indexContent += `- [${page.title}](${page.title}.md)\n`;
     zip.file(`${page.title}.md`, page.content);
+    (page.assets || []).forEach(asset => {
+      zip.file(asset.relativePath, asset.base64, { base64: true });
+    });
   });
 
   zip.file('README.md', indexContent);
+
+  const blob = await zip.generateAsync({
+    type: 'blob',
+    compression: 'DEFLATE',
+    compressionOptions: { level: 6 }
+  });
+
+  const objectUrl = URL.createObjectURL(blob);
+
+  return new Promise((resolve, reject) => {
+    chrome.downloads.download({
+      url: objectUrl,
+      filename: `${batchState.folderName}.zip`,
+      saveAs: true
+    }, () => {
+      if (chrome.runtime.lastError) {
+        URL.revokeObjectURL(objectUrl);
+        reject(new Error(chrome.runtime.lastError.message));
+        return;
+      }
+      setTimeout(() => URL.revokeObjectURL(objectUrl), 60000);
+      resolve();
+    });
+  });
+}
+
+function inlineAssetsInMarkdown(markdown, assets) {
+  if (!assets || !assets.length) return markdown;
+  let result = markdown;
+  for (const asset of assets) {
+    const dataUrl = `data:${asset.mimeType};base64,${asset.base64}`;
+    const escaped = asset.relativePath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    result = result.replace(
+      new RegExp(`!\\[[^\\]]*\\]\\(${escaped}\\)`, 'g'),
+      `![](${dataUrl})`
+    );
+  }
+  return result;
+}
+
+function prefixPageAssets(markdown, assets, pagePrefix) {
+  if (!assets || !assets.length) return { markdown, assets: [] };
+  const prefixedAssets = assets.map((asset, index) => {
+    const baseName = asset.relativePath.replace(/^images\//, '');
+    return {
+      ...asset,
+      relativePath: `images/${pagePrefix}-${baseName}`
+    };
+  });
+  let updatedMarkdown = markdown;
+  assets.forEach((asset, index) => {
+    updatedMarkdown = updatedMarkdown.split(asset.relativePath).join(prefixedAssets[index].relativePath);
+  });
+  return { markdown: updatedMarkdown, assets: prefixedAssets };
+}
+
+async function createPageZip(markdown, assets, zipFileName, mdFileName) {
+  const zip = new JSZip();
+  zip.file(mdFileName, markdown);
+  (assets || []).forEach(asset => {
+    zip.file(asset.relativePath, asset.base64, { base64: true });
+  });
 
   const base64Zip = await zip.generateAsync({
     type: 'base64',
@@ -451,7 +572,7 @@ async function createZipArchive() {
   return new Promise((resolve, reject) => {
     chrome.downloads.download({
       url: dataUrl,
-      filename: `${batchState.folderName}.zip`,
+      filename: zipFileName,
       saveAs: true
     }, () => {
       if (chrome.runtime.lastError) {
@@ -470,8 +591,8 @@ async function createSingleMarkdownFile(fileName) {
   batchState.convertedPages.forEach((page, index) => {
     // Add page title as a heading
     combinedMarkdown += `# ${page.title}\n\n`;
-    // Add page content
-    combinedMarkdown += page.content;
+    // Add page content with diagram images inlined as base64
+    combinedMarkdown += inlineAssetsInMarkdown(page.content, page.assets);
     // Add separator between pages (except for the last page)
     if (index < batchState.convertedPages.length - 1) {
       combinedMarkdown += '\n\n---\n\n';
@@ -902,6 +1023,18 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       return;
     }
     ensureContentScript(tabId)
+      .then(() => sendResponse({ success: true }))
+      .catch(error => sendResponse({ success: false, error: error.message }));
+    return true;
+  }
+
+  if (request.action === 'downloadPageZip') {
+    const { markdown, assets, zipFileName, mdFileName } = request;
+    if (!markdown || !zipFileName || !mdFileName) {
+      sendResponse({ success: false, error: 'Missing markdown or filename for ZIP download.' });
+      return;
+    }
+    createPageZip(markdown, assets || [], zipFileName, mdFileName)
       .then(() => sendResponse({ success: true }))
       .catch(error => sendResponse({ success: false, error: error.message }));
     return true;

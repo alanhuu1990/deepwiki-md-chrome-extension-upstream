@@ -60,16 +60,31 @@ document.addEventListener('DOMContentLoaded', () => {
           ? `${headTitle}-${currentTitle}.md`
           : `${currentTitle}.md`;
 
-        const blob = new Blob([response.markdown], { type: 'text/markdown' });
-        const url = URL.createObjectURL(blob);
+        if (response.assets && response.assets.length > 0) {
+          const zipFileName = fileName.replace(/\.md$/i, '.zip');
+          const zipResponse = await chrome.runtime.sendMessage({
+            action: 'downloadPageZip',
+            markdown: response.markdown,
+            assets: response.assets,
+            zipFileName,
+            mdFileName: fileName
+          });
+          if (!zipResponse || !zipResponse.success) {
+            throw new Error(zipResponse?.error || 'Failed to create ZIP download.');
+          }
+          showStatus('Conversion successful! Downloading ZIP with diagrams...', 'success');
+        } else {
+          const blob = new Blob([response.markdown], { type: 'text/markdown' });
+          const url = URL.createObjectURL(blob);
 
-        chrome.downloads.download({
-          url,
-          filename: fileName,
-          saveAs: true
-        });
+          chrome.downloads.download({
+            url,
+            filename: fileName,
+            saveAs: true
+          });
 
-        showStatus('Conversion successful! Downloading...', 'success');
+          showStatus('Conversion successful! Downloading...', 'success');
+        }
       } else {
         showStatus('Conversion failed: ' + (response?.error || 'Unknown error'), 'error');
       }
