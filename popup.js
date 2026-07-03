@@ -37,7 +37,14 @@ document.addEventListener('DOMContentLoaded', () => {
   const batchHistoryPanel = document.getElementById('batchHistoryPanel');
   const batchHistoryList = document.getElementById('batchHistoryList');
   const batchHistoryClearBtn = document.getElementById('batchHistoryClearBtn');
+  const batchQueueSection = document.getElementById('batchQueueSection');
+  const batchQueueToggle = document.getElementById('batchQueueToggle');
+  const batchQueueToggleLabel = document.getElementById('batchQueueToggleLabel');
+  const batchQueuePanel = document.getElementById('batchQueuePanel');
+  const batchQueueList = document.getElementById('batchQueueList');
+  const batchQueueClearBtn = document.getElementById('batchQueueClearBtn');
   let batchRunning = false;
+  let queueLength = 0;
 
   chrome.runtime.onMessage.addListener((request) => {
     if (request.action === 'batchUpdate') {
@@ -45,11 +52,40 @@ document.addEventListener('DOMContentLoaded', () => {
       if (request.type === 'completed') {
         loadBatchHistory();
       }
+      if (request.queue || typeof request.queueLength === 'number') {
+        renderBatchQueue(request.queue || [], request.queueLength ?? 0, request.activeJob, request.running);
+      }
     }
   });
 
   initializeBatchStatus();
   loadBatchHistory();
+
+  batchQueueToggle.addEventListener('click', () => {
+    const collapsed = batchQueuePanel.classList.toggle('collapsed');
+    batchQueueToggle.setAttribute('aria-expanded', String(!collapsed));
+    document.getElementById('batchQueueToggleIcon').textContent = collapsed ? '▶' : '▼';
+  });
+
+  batchQueueClearBtn.addEventListener('click', async () => {
+    if (!queueLength) {
+      return;
+    }
+    if (!confirm('Remove all queued batch jobs?')) {
+      return;
+    }
+    try {
+      const response = await chrome.runtime.sendMessage({ action: 'clearBatchQueue' });
+      if (!response || !response.success) {
+        throw new Error(response?.error || 'Failed to clear batch queue.');
+      }
+      const statusResponse = await chrome.runtime.sendMessage({ action: 'getBatchStatus' });
+      applyBatchStatus(statusResponse);
+      showStatus('Batch queue cleared.', 'info');
+    } catch (error) {
+      showStatus('Unable to clear queue: ' + error.message, 'error');
+    }
+  });
 
   batchHistoryToggle.addEventListener('click', () => {
     const collapsed = batchHistoryPanel.classList.toggle('collapsed');
@@ -134,19 +170,30 @@ document.addEventListener('DOMContentLoaded', () => {
         return;
       }
 
-      showCancelButton(true);
-      disableBatchButton(true);
-      showStatus('Starting batch conversion...', 'info');
+      if (!batchRunning) {
+        showCancelButton(true);
+      }
+      showStatus(batchRunning ? 'Adding batch to queue...' : 'Starting batch conversion...', 'info');
 
       const response = await chrome.runtime.sendMessage({ action: 'startBatch', tabId: tab.id });
 
       if (!response || !response.success) {
         throw new Error(response?.error || 'Failed to start batch conversion.');
       }
+
+      if (response.queued) {
+        showStatus(`Queued at position ${response.position}: ${response.label}`, 'info');
+      } else {
+        showCancelButton(true);
+      }
+
+      const statusResponse = await chrome.runtime.sendMessage({ action: 'getBatchStatus' });
+      applyBatchStatus(statusResponse);
     } catch (error) {
       showStatus('An error occurred: ' + error.message, 'error');
-      showCancelButton(false);
-      disableBatchButton(false);
+      if (!batchRunning && queueLength === 0) {
+        showCancelButton(false);
+      }
     }
   });
 
@@ -159,19 +206,30 @@ document.addEventListener('DOMContentLoaded', () => {
         return;
       }
 
-      showCancelButton(true);
-      disableBatchButton(true);
-      showStatus('Starting single-file batch conversion...', 'info');
+      if (!batchRunning) {
+        showCancelButton(true);
+      }
+      showStatus(batchRunning ? 'Adding single-file batch to queue...' : 'Starting single-file batch conversion...', 'info');
 
       const response = await chrome.runtime.sendMessage({ action: 'startBatchSingleFile', tabId: tab.id });
 
       if (!response || !response.success) {
         throw new Error(response?.error || 'Failed to start single-file batch conversion.');
       }
+
+      if (response.queued) {
+        showStatus(`Queued at position ${response.position}: ${response.label}`, 'info');
+      } else {
+        showCancelButton(true);
+      }
+
+      const statusResponse = await chrome.runtime.sendMessage({ action: 'getBatchStatus' });
+      applyBatchStatus(statusResponse);
     } catch (error) {
       showStatus('An error occurred: ' + error.message, 'error');
-      showCancelButton(false);
-      disableBatchButton(false);
+      if (!batchRunning && queueLength === 0) {
+        showCancelButton(false);
+      }
     }
   });
 
@@ -205,16 +263,27 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     batchRunning = !!statusPayload.running;
+    queueLength = statusPayload.queueLength ?? queueLength;
 
     if (statusPayload.running) {
       showCancelButton(true);
-      disableBatchButton(true);
+      cancelBtn.textContent = queueLength > 0 ? 'Cancel current batch' : 'Cancel Batch Operation';
     } else {
       showCancelButton(false);
-      disableBatchButton(false);
+      cancelBtn.textContent = 'Cancel Batch Operation';
     }
 
+    disableBatchButton(false);
     setBatchHistoryActionsDisabled(batchRunning);
+
+    if (statusPayload.queue || typeof statusPayload.queueLength === 'number') {
+      renderBatchQueue(
+        statusPayload.queue || [],
+        statusPayload.queueLength ?? 0,
+        statusPayload.activeJob,
+        statusPayload.running
+      );
+    }
 
     if (statusPayload.message) {
       showStatus(statusPayload.message, statusPayload.level || 'info');
@@ -228,6 +297,101 @@ document.addEventListener('DOMContentLoaded', () => {
   function disableBatchButton(disable) {
     batchDownloadBtn.disabled = disable;
     batchSingleFileBtn.disabled = disable;
+  }
+
+  function formatQueueMode(mode) {
+    return mode === 'single-md' ? 'Single file' : 'ZIP';
+  }
+
+  function renderBatchQueue(queue, length, activeJob, running) {
+    queueLength = length;
+    batchQueueList.innerHTML = '';
+
+    const waitingLabel = length === 1 ? '1 waiting' : `${length} waiting`;
+    batchQueueToggleLabel.textContent = length > 0
+      ? `Batch queue (${waitingLabel})`
+      : running
+        ? 'Batch queue (running)'
+        : 'Batch queue';
+
+    if (!length && !running) {
+      batchQueueSection.hidden = true;
+      batchQueueClearBtn.disabled = true;
+      return;
+    }
+
+    batchQueueSection.hidden = false;
+    batchQueueClearBtn.disabled = length === 0;
+
+    if (running && activeJob) {
+      const activeItem = document.createElement('li');
+      activeItem.className = 'batch-queue-item';
+
+      const activeMeta = document.createElement('div');
+      activeMeta.className = 'batch-queue-meta';
+
+      const activeLabel = document.createElement('div');
+      activeLabel.className = 'batch-queue-label';
+      activeLabel.textContent = activeJob.label || 'Current batch';
+      activeLabel.title = activeJob.label || 'Current batch';
+
+      const activeDetails = document.createElement('div');
+      activeDetails.className = 'batch-queue-details';
+      activeDetails.innerHTML = `<span class="batch-queue-mode">${formatQueueMode(activeJob.mode)}</span>Running now`;
+
+      activeMeta.appendChild(activeLabel);
+      activeMeta.appendChild(activeDetails);
+      activeItem.appendChild(activeMeta);
+      batchQueueList.appendChild(activeItem);
+    }
+
+    queue.forEach(item => {
+      const li = document.createElement('li');
+      li.className = 'batch-queue-item';
+
+      const meta = document.createElement('div');
+      meta.className = 'batch-queue-meta';
+
+      const label = document.createElement('div');
+      label.className = 'batch-queue-label';
+      label.textContent = item.label || item.url || 'Queued batch';
+      label.title = item.label || item.url || 'Queued batch';
+
+      const details = document.createElement('div');
+      details.className = 'batch-queue-details';
+      details.innerHTML = `<span class="batch-queue-mode">${formatQueueMode(item.mode)}</span>#${item.position} in queue`;
+
+      meta.appendChild(label);
+      meta.appendChild(details);
+
+      const actions = document.createElement('div');
+      actions.className = 'batch-queue-actions';
+
+      const removeBtn = document.createElement('button');
+      removeBtn.type = 'button';
+      removeBtn.className = 'batch-queue-remove';
+      removeBtn.textContent = '×';
+      removeBtn.title = 'Remove from queue';
+      removeBtn.addEventListener('click', () => removeBatchQueueItem(item.id));
+
+      actions.appendChild(removeBtn);
+      li.appendChild(meta);
+      li.appendChild(actions);
+      batchQueueList.appendChild(li);
+    });
+  }
+
+  async function removeBatchQueueItem(id) {
+    try {
+      const response = await chrome.runtime.sendMessage({ action: 'removeBatchQueueItem', id });
+      if (!response || !response.success) {
+        throw new Error(response?.error || 'Failed to remove queued job.');
+      }
+      const statusResponse = await chrome.runtime.sendMessage({ action: 'getBatchStatus' });
+      applyBatchStatus(statusResponse);
+    } catch (error) {
+      showStatus('Unable to remove queued job: ' + error.message, 'error');
+    }
   }
 
   function showStatus(message, type) {

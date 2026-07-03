@@ -21,12 +21,13 @@ Use it to:
 - Repurpose content for blogs or internal wikis
 - Preserve repo documentation from DeepWiki or Devin wikis
 
-**Current version:** [0.4.0](CHANGELOG.md) — see [CHANGELOG.md](CHANGELOG.md) for release notes.
+**Current version:** [0.5.0](CHANGELOG.md) — see [CHANGELOG.md](CHANGELOG.md) for release notes.
 
 ### Recent releases
 
 | Version | Highlights |
 |---------|------------|
+| **0.5.0** | Batch operation queue, recent batches increased to 20 entries |
 | **0.4.0** | Diagram PNG export, batch download history, reliable batch ZIP download in the service worker |
 | **0.3.0** | **Batch image download fixes** — diagram PNGs are collected per page, written into the ZIP with unique `images/` paths, and Markdown links stay in sync; batch history to re-download completed archives |
 
@@ -47,7 +48,9 @@ Download every subpage listed in the sidebar as its own `.md` file, packaged in 
 - Per-page Markdown files
 - **`images/`** — diagram PNGs (and SVG fallback files when PNG rasterization fails)
 
-Progress and cancel are shown in the popup while the extension navigates each page.
+Progress and cancel are shown in the popup while the extension navigates each page. While a batch is running, you can queue additional **Download All Pages** or **Download as one md file** jobs from other wiki tabs; they run one after another automatically.
+
+**Batch queue:** Open the popup → **Batch queue** to see the active job and waiting jobs. Remove individual queued jobs or **Clear queue**. **Cancel current batch** stops only the job in progress.
 
 **Batch diagram images (v0.3.0+):** Each wiki page is converted on its own, with diagrams rasterized from the live DOM before Markdown is generated. Image files use **page-specific names** (for example `images/PageTitle-diagram-1.png`) so multiple pages in one batch do not overwrite each other’s assets. The `.md` files in the ZIP reference those same paths, so viewers and static-site tools can resolve images offline. This fixes earlier batch runs where diagrams were missing, duplicated, or broken links inside the archive.
 
@@ -62,7 +65,7 @@ After a successful batch (ZIP or single-file), the extension saves the result lo
 - Open the popup → **Recent batches**
 - **Download** — opens the save dialog again (useful if you dismissed it by mistake)
 - **Remove** (×) or **Clear all** — delete stored copies
-- Keeps up to **5** recent batches; entries over **80 MB** are not stored (the first download still runs)
+- Keeps up to **20** recent batches; entries over **80 MB** are not stored (the first download still runs)
 
 History is stored in **IndexedDB** on your device only. Single-page downloads are not kept in history.
 
@@ -113,8 +116,9 @@ Supported URLs: `https://deepwiki.com/<org>/<project>/...` and Devin wiki pages 
 
 1. Open the **main** page of a wiki (sidebar visible)
 2. Click the extension icon → **Download All Pages**
-3. Wait for progress in the popup (use **Cancel Batch Operation** if needed)
-4. Save the ZIP when prompted
+3. Wait for progress in the popup (use **Cancel Batch Operation** or **Cancel current batch** if needed)
+4. Optionally queue more batch jobs from other wiki tabs while one is running
+5. Save the ZIP when prompted
 
 **ZIP layout (pages with diagrams):**
 
@@ -160,7 +164,8 @@ If you close the save dialog without saving, use **Recent batches** → **Downlo
 | **Sites** | `https://deepwiki.com/*`, `https://app.devin.ai/*` |
 | **Format** | UTF-8 Markdown (`.md`); batch ZIP uses DEFLATE |
 | **Diagrams** | Per-page PNG (or SVG) under `images/` in batch ZIPs, with paths prefixed by page title; base64 inline in single-file batch; Mermaid text fallback when export fails |
-| **Batch history** | IndexedDB (`deepwiki-batch-history`), max 5 entries, 80 MB per-entry storage cap |
+| **Batch history** | IndexedDB (`deepwiki-batch-history`), max 20 entries, 80 MB per-entry storage cap |
+| **Batch queue** | In-memory FIFO in service worker (max 20 waiting jobs); lost on extension reload |
 | **Permissions** | `downloads`, `tabs`, `webNavigation`, `scripting` — no `storage` permission; history uses IndexedDB |
 
 ## Requirements
@@ -191,7 +196,7 @@ If you close the save dialog without saving, use **Recent batches** → **Downlo
 
 **Diagrams missing or broken in a batch ZIP**
 
-- Use extension **v0.3.0 or later** (current **0.4.0**) — batch image packaging was fixed in that release line
+- Use extension **v0.3.0 or later** (current **0.5.0**) — batch image packaging was fixed in that release line
 - Let each page finish rendering before the extension moves on (diagrams are captured from the DOM)
 - Unzip and confirm `images/` contains `PageName-diagram-N.png` files matching `![](images/...)` links in the `.md` files
 - If the save dialog failed, re-download the same batch from **Recent batches** rather than re-running conversion
@@ -200,6 +205,7 @@ If you close the save dialog without saving, use **Recent batches** → **Downlo
 
 - [ ] Auto-translation before conversion
 - [x] Local storage for recent batch downloads (v0.4.0 — IndexedDB history)
+- [x] Batch operation queue (v0.5.0)
 - [ ] Cloud export (Google Drive, OneDrive, Notion, etc.)
 - [ ] Custom conversion templates
 - [ ] Configurable diagram format and metadata
@@ -231,6 +237,6 @@ MIT License — see [LICENSE](LICENSE).
 
 ---
 
-**Version:** [CHANGELOG.md](CHANGELOG.md) (current: **0.4.0**)  
+**Version:** [CHANGELOG.md](CHANGELOG.md) (current: **0.5.0**)  
 **Maintainer:** [@philipz](https://github.com/philipz)  
 **Repository:** https://github.com/philipz/deepwiki-md-chrome-extension

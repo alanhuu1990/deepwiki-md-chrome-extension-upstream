@@ -70,10 +70,19 @@ async function ensureContentScript(tabId) {
   }
 }
 
+const BATCH_QUEUE_MAX = 20;
+
+const STRUCTURAL_BATCH_TYPES = new Set([
+  'queued', 'queueUpdated', 'queueItemRemoved', 'queueCleared', 'queueJobSkipped',
+  'started', 'completed', 'cancelled', 'error', 'zipping', 'merging'
+]);
+
 const createInitialBatchState = () => ({
   isRunning: false,
   tabId: null,
   originalUrl: null,
+  mode: 'zip',
+  singleFileName: null,
   pages: [],
   convertedPages: [],
   folderName: '',
@@ -86,6 +95,7 @@ const createInitialBatchState = () => ({
 });
 
 let batchState = createInitialBatchState();
+let batchQueue = [];
 let lastBatchReport = {
   type: 'idle',
   message: 'Batch converter ready.',
@@ -275,9 +285,44 @@ function sendMessageToTab(tabId, message, forceDirect = false) {
   });
 }
 
-function broadcastBatchUpdate(type, data = {}, overrideRunning) {
+function getBatchQueueSnapshot() {
+  return batchQueue.map(({ id, label, mode, url, enqueuedAt }, index) => ({
+    id,
+    label,
+    mode,
+    url,
+    enqueuedAt,
+    position: index + 1
+  }));
+}
+
+function getActiveJobSnapshot() {
+  if (!batchState.isRunning) {
+    return null;
+  }
+  return {
+    label: batchState.folderName,
+    mode: batchState.mode,
+    tabId: batchState.tabId
+  };
+}
+
+function attachQueueSnapshot(payload, includeQueueSnapshot) {
+  const includeQueue = typeof includeQueueSnapshot === 'boolean'
+    ? includeQueueSnapshot
+    : STRUCTURAL_BATCH_TYPES.has(payload.type);
+  if (!includeQueue) {
+    return payload;
+  }
+  payload.queueLength = batchQueue.length;
+  payload.queue = getBatchQueueSnapshot();
+  payload.activeJob = getActiveJobSnapshot();
+  return payload;
+}
+
+function broadcastBatchUpdate(type, data = {}, overrideRunning, includeQueueSnapshot) {
   const running = typeof overrideRunning === 'boolean' ? overrideRunning : batchState.isRunning;
-  const payload = {
+  const payload = attachQueueSnapshot({
     action: 'batchUpdate',
     type,
     running,
@@ -287,7 +332,7 @@ function broadcastBatchUpdate(type, data = {}, overrideRunning) {
     cancelRequested: batchState.cancelRequested,
     message: data.message || '',
     level: data.level || 'info'
-  };
+  }, includeQueueSnapshot);
 
   lastBatchReport = payload;
 
@@ -303,7 +348,7 @@ function broadcastBatchUpdate(type, data = {}, overrideRunning) {
 
 function getBatchStatusPayload() {
   if (batchState.isRunning) {
-    return {
+    return attachQueueSnapshot({
       running: true,
       processed: batchState.processed,
       failed: batchState.failed,
@@ -312,11 +357,21 @@ function getBatchStatusPayload() {
       message: lastBatchReport.message,
       level: lastBatchReport.level,
       type: lastBatchReport.type
-    };
+    }, true);
   }
 
   const { action, ...rest } = lastBatchReport;
-  return { running: false, ...rest };
+  return attachQueueSnapshot({ running: false, ...rest }, true);
+}
+
+function getBatchQueuePayload() {
+  return {
+    success: true,
+    running: batchState.isRunning,
+    queueLength: batchQueue.length,
+    queue: getBatchQueueSnapshot(),
+    activeJob: getActiveJobSnapshot()
+  };
 }
 
 function sanitizeName(value, fallback = 'page') {
@@ -719,8 +774,11 @@ async function runBatchProcessing() {
     await downloadZipBytes(bytes, filename);
 
     batchState.isRunning = false;
+    const nextQueued = batchQueue.length;
     broadcastBatchUpdate('completed', {
-      message: `ZIP ready. Success ${batchState.processed}, Failed ${batchState.failed}.${historyNote}`,
+      message: nextQueued
+        ? `ZIP ready. Success ${batchState.processed}, Failed ${batchState.failed}.${historyNote} Starting next queued job...`
+        : `ZIP ready. Success ${batchState.processed}, Failed ${batchState.failed}.${historyNote}`,
       level: 'success'
     }, false);
   } catch (error) {
@@ -731,7 +789,7 @@ async function runBatchProcessing() {
     }, false);
   } finally {
     await restoreOriginalPage();
-    resetBatchState();
+    await processNextInQueue();
   }
 }
 
@@ -784,8 +842,11 @@ async function runBatchSingleFileProcessing(fileName) {
     await downloadMarkdown(markdown, fileName);
 
     batchState.isRunning = false;
+    const nextQueued = batchQueue.length;
     broadcastBatchUpdate('completed', {
-      message: `File ready. Success ${batchState.processed}, Failed ${batchState.failed}.${historyNote}`,
+      message: nextQueued
+        ? `File ready. Success ${batchState.processed}, Failed ${batchState.failed}.${historyNote} Starting next queued job...`
+        : `File ready. Success ${batchState.processed}, Failed ${batchState.failed}.${historyNote}`,
       level: 'success'
     }, false);
   } catch (error) {
@@ -796,7 +857,7 @@ async function runBatchSingleFileProcessing(fileName) {
     }, false);
   } finally {
     await restoreOriginalPage();
-    resetBatchState();
+    await processNextInQueue();
   }
 }
 
@@ -816,142 +877,83 @@ function getTabById(tabId) {
   });
 }
 
-async function startBatchProcessing(tabId) {
-  if (batchState.isRunning) {
-    throw new Error('Batch conversion already running.');
-  }
+function deriveBatchLabelFromUrl(url) {
+  try {
+    const urlObj = new URL(url);
+    const pathSegments = urlObj.pathname.split('/').filter(segment => segment.length > 0);
 
+    if (urlObj.hostname.includes('devin.ai')) {
+      const wikiIndex = pathSegments.indexOf('wiki');
+      if (wikiIndex !== -1 && pathSegments[wikiIndex + 2]) {
+        return `Devin-${sanitizeName(pathSegments[wikiIndex + 2], 'project')}`;
+      }
+    }
+
+    if (pathSegments.length >= 2) {
+      return `${sanitizeName(pathSegments[0], 'org')}/${sanitizeName(pathSegments[1], 'project')}`;
+    }
+
+    return sanitizeName(pathSegments[0] || urlObj.hostname, 'wiki');
+  } catch (error) {
+    return 'batch';
+  }
+}
+
+async function createBatchDescriptor(tabId, mode) {
   const tab = await getTabById(tabId);
   if (!isValidDeepWikiUrl(tab.url)) {
     throw new Error('Please open a valid DeepWiki documentation page (e.g., https://deepwiki.com/org/project) before starting batch conversion.');
   }
 
-  await ensureContentScript(tabId);
-  const extraction = await sendMessageToTab(tabId, { action: 'extractAllPages' });
-  if (!extraction || !extraction.success) {
-    throw new Error(extraction?.error || 'Failed to extract sidebar links.');
-  }
-
-  const pages = extraction.pages || [];
-  if (!pages.length) {
-    throw new Error('No child pages were detected on this document.');
-  }
-
-  // Determine folder name based on domain and URL structure
-  const urlObj = new URL(tab.url);
-  const pathSegments = urlObj.pathname.split('/').filter(segment => segment.length > 0);
-
-  // Default extraction (DeepWiki default or Devin non-wiki)
-  let org = sanitizeName(pathSegments[0] || 'org', 'org');
-  let project = sanitizeName(pathSegments[1] || 'project', 'project');
-  let fileNamePrefix = '';
-
-  if (urlObj.hostname.includes('devin.ai')) {
-    // Special case for Devin wiki URLs: /org/[org]/wiki/[user]/[project]
-    const wikiIndex = pathSegments.indexOf('wiki');
-    if (wikiIndex !== -1 && pathSegments[wikiIndex + 2]) {
-      org = sanitizeName(pathSegments[1] || 'org', 'org'); // Org is usually first
-      project = sanitizeName(pathSegments[wikiIndex + 2] || 'project', 'project');
-    }
-    fileNamePrefix = 'Devin-';
-  }
-
-  // Decide folder name
-  let calculatedFolderName;
-  if (urlObj.hostname.includes('devin.ai')) {
-    calculatedFolderName = `${fileNamePrefix}${project}`; // Cleaner: just project name or Devin-Project
-  } else {
-    // Keep old behavior for DeepWiki Zip to avoid regression
-    calculatedFolderName = sanitizeFolderName(extraction.headTitle || extraction.currentTitle || 'deepwiki');
-  }
-
-  batchState = {
-    isRunning: true,
-    tabId,
-    originalUrl: tab.url,
-    pages,
-    convertedPages: [],
-    folderName: calculatedFolderName,
-    processed: 0,
-    failed: 0,
-    cancelRequested: false,
-    total: pages.length,
-    currentTitle: '',
-    fileNames: new Set()
-  };
-
-  broadcastBatchUpdate('started', {
-    message: `Found ${batchState.total} pages. Starting batch conversion...`
-  });
-
-  runBatchProcessing();
-
   return {
-    total: batchState.total,
-    folderName: batchState.folderName
+    id: crypto.randomUUID(),
+    tabId,
+    mode,
+    url: tab.url,
+    label: deriveBatchLabelFromUrl(tab.url),
+    enqueuedAt: new Date().toISOString()
   };
 }
 
-async function startBatchSingleFileProcessing(tabId) {
-  if (batchState.isRunning) {
-    throw new Error('Batch conversion already running.');
-  }
-
-  const tab = await getTabById(tabId);
-  if (!isValidDeepWikiUrl(tab.url)) {
-    throw new Error('Please open a valid DeepWiki documentation page (e.g., https://deepwiki.com/org/project) before starting batch conversion.');
-  }
-
-  await ensureContentScript(tabId);
-  const extraction = await sendMessageToTab(tabId, { action: 'extractAllPages' });
-  if (!extraction || !extraction.success) {
-    throw new Error(extraction?.error || 'Failed to extract sidebar links.');
-  }
-
+function initializeBatchState(tabId, mode, extraction, tab) {
   const pages = extraction.pages || [];
   if (!pages.length) {
     throw new Error('No child pages were detected on this document.');
   }
 
-  // Extract org and project from URL and sanitize for safe filenames
   const urlObj = new URL(tab.url);
   const pathSegments = urlObj.pathname.split('/').filter(segment => segment.length > 0);
 
-  // Default extraction
   let org = sanitizeName(pathSegments[0] || 'org', 'org');
   let project = sanitizeName(pathSegments[1] || 'project', 'project');
   let fileNamePrefix = '';
 
   if (urlObj.hostname.includes('devin.ai')) {
-    // Special case for Devin wiki URLs
     const wikiIndex = pathSegments.indexOf('wiki');
     if (wikiIndex !== -1 && pathSegments[wikiIndex + 2]) {
       org = sanitizeName(pathSegments[1] || 'org', 'org');
       project = sanitizeName(pathSegments[wikiIndex + 2] || 'project', 'project');
     }
-    // User requested "Devin-" prefix for Devin downloads
     fileNamePrefix = 'Devin-';
-  } else {
-    // DeepWiki Logic
-    // User requested to match "Download All Pages" (Zip) naming convention.
-    // Zip uses: sanitizeFolderName(extraction.headTitle || extraction.currentTitle || 'deepwiki')
-    // So we should do the same here.
-    const titleBasedName = sanitizeName(extraction.headTitle || extraction.currentTitle || 'deepwiki');
-    const lastIndexedDate = sanitizeName(extraction.lastIndexedDate || '', '');
+  }
 
-    // Override the structured name generation for DeepWiki to match Zip behavior
-    const fileName = lastIndexedDate
-      ? `${titleBasedName}-${lastIndexedDate}.md`
-      : `${titleBasedName}.md`;
+  if (mode === 'zip') {
+    let calculatedFolderName;
+    if (urlObj.hostname.includes('devin.ai')) {
+      calculatedFolderName = `${fileNamePrefix}${project}`;
+    } else {
+      calculatedFolderName = sanitizeFolderName(extraction.headTitle || extraction.currentTitle || 'deepwiki');
+    }
 
-    // Return early with this name for DeepWiki
     batchState = {
       isRunning: true,
       tabId,
       originalUrl: tab.url,
+      mode: 'zip',
+      singleFileName: null,
       pages,
       convertedPages: [],
-      folderName: fileName.replace('.md', ''),
+      folderName: calculatedFolderName,
       processed: 0,
       failed: 0,
       cancelRequested: false,
@@ -960,35 +962,36 @@ async function startBatchSingleFileProcessing(tabId) {
       fileNames: new Set()
     };
 
-    broadcastBatchUpdate('started', {
-      message: `Found ${batchState.total} pages. Starting single-file batch conversion...`
-    });
-
-    runBatchSingleFileProcessing(fileName);
-
     return {
       total: batchState.total,
-      fileName: fileName
+      folderName: batchState.folderName
     };
   }
 
-  const lastIndexedDate = sanitizeName(extraction.lastIndexedDate || '', '');
-
-  // Generate sanitized filename
-  // This block now only runs for Devin, as DeepWiki returns early above.
-  const baseName = `${fileNamePrefix}${org}-${project}`;
-
-  const fileName = lastIndexedDate
-    ? `${baseName}-${lastIndexedDate}.md`
-    : `${baseName}.md`;
+  let singleFileName;
+  if (urlObj.hostname.includes('devin.ai')) {
+    const lastIndexedDate = sanitizeName(extraction.lastIndexedDate || '', '');
+    const baseName = `${fileNamePrefix}${org}-${project}`;
+    singleFileName = lastIndexedDate
+      ? `${baseName}-${lastIndexedDate}.md`
+      : `${baseName}.md`;
+  } else {
+    const titleBasedName = sanitizeName(extraction.headTitle || extraction.currentTitle || 'deepwiki');
+    const lastIndexedDate = sanitizeName(extraction.lastIndexedDate || '', '');
+    singleFileName = lastIndexedDate
+      ? `${titleBasedName}-${lastIndexedDate}.md`
+      : `${titleBasedName}.md`;
+  }
 
   batchState = {
     isRunning: true,
     tabId,
     originalUrl: tab.url,
+    mode: 'single-md',
+    singleFileName,
     pages,
     convertedPages: [],
-    folderName: fileName.replace('.md', ''),
+    folderName: singleFileName.replace('.md', ''),
     processed: 0,
     failed: 0,
     cancelRequested: false,
@@ -997,16 +1000,135 @@ async function startBatchSingleFileProcessing(tabId) {
     fileNames: new Set()
   };
 
-  broadcastBatchUpdate('started', {
-    message: `Found ${batchState.total} pages. Starting single-file batch conversion...`
-  });
-
-  runBatchSingleFileProcessing(fileName);
-
   return {
     total: batchState.total,
-    fileName: fileName
+    fileName: singleFileName
   };
+}
+
+async function startBatchFromDescriptor(descriptor) {
+  let tab;
+  try {
+    tab = await getTabById(descriptor.tabId);
+  } catch (error) {
+    throw new Error('Tab no longer exists.');
+  }
+
+  if (!isValidDeepWikiUrl(tab.url)) {
+    throw new Error('Tab URL is no longer a valid DeepWiki or Devin page.');
+  }
+
+  await ensureContentScript(descriptor.tabId);
+  const extraction = await sendMessageToTab(descriptor.tabId, { action: 'extractAllPages' });
+  if (!extraction || !extraction.success) {
+    throw new Error(extraction?.error || 'Failed to extract sidebar links.');
+  }
+
+  const initResult = initializeBatchState(descriptor.tabId, descriptor.mode, extraction, tab);
+  const modeLabel = descriptor.mode === 'zip' ? 'batch' : 'single-file batch';
+
+  broadcastBatchUpdate('started', {
+    message: `Found ${batchState.total} pages. Starting ${modeLabel} conversion...`
+  }, true, true);
+
+  if (descriptor.mode === 'zip') {
+    runBatchProcessing();
+    return initResult;
+  }
+
+  runBatchSingleFileProcessing(initResult.fileName);
+  return initResult;
+}
+
+async function processNextInQueue() {
+  resetBatchState();
+
+  if (!batchQueue.length) {
+    broadcastBatchUpdate('queueUpdated', {
+      message: 'Batch converter ready.',
+      level: 'info'
+    }, false, true);
+    return;
+  }
+
+  const descriptor = batchQueue.shift();
+  try {
+    await startBatchFromDescriptor(descriptor);
+  } catch (error) {
+    broadcastBatchUpdate('queueJobSkipped', {
+      message: `Skipped queued job (${descriptor.label}): ${error.message || error}`,
+      level: 'error'
+    }, false, true);
+    await processNextInQueue();
+  }
+}
+
+async function enqueueOrStartBatch(tabId, mode) {
+  if (batchState.isRunning) {
+    if (batchQueue.length >= BATCH_QUEUE_MAX) {
+      throw new Error(`Batch queue is full (max ${BATCH_QUEUE_MAX} waiting jobs).`);
+    }
+
+    const descriptor = await createBatchDescriptor(tabId, mode);
+    batchQueue.push(descriptor);
+    const position = batchQueue.length;
+
+    broadcastBatchUpdate('queued', {
+      message: `Queued at position ${position}: ${descriptor.label}`,
+      level: 'info'
+    }, true, true);
+
+    return {
+      queued: true,
+      position,
+      label: descriptor.label,
+      id: descriptor.id
+    };
+  }
+
+  const descriptor = await createBatchDescriptor(tabId, mode);
+  const result = await startBatchFromDescriptor(descriptor);
+  return {
+    queued: false,
+    ...result
+  };
+}
+
+function removeBatchQueueItem(id) {
+  const before = batchQueue.length;
+  batchQueue = batchQueue.filter(item => item.id !== id);
+  if (batchQueue.length === before) {
+    return false;
+  }
+
+  broadcastBatchUpdate('queueItemRemoved', {
+    message: batchQueue.length
+      ? `${batchQueue.length} batch job(s) still queued.`
+      : 'Batch queue cleared of removed item.',
+    level: 'info'
+  }, batchState.isRunning, true);
+  return true;
+}
+
+function clearBatchQueue() {
+  if (!batchQueue.length) {
+    return false;
+  }
+
+  batchQueue = [];
+  broadcastBatchUpdate('queueCleared', {
+    message: 'Batch queue cleared.',
+    level: 'info'
+  }, batchState.isRunning, true);
+  return true;
+}
+
+async function startBatchProcessing(tabId) {
+  return enqueueOrStartBatch(tabId, 'zip');
+}
+
+async function startBatchSingleFileProcessing(tabId) {
+  return enqueueOrStartBatch(tabId, 'single-md');
 }
 
 // Listen for extension installation event
@@ -1083,6 +1205,28 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
   if (request.action === 'getBatchStatus') {
     sendResponse(getBatchStatusPayload());
+    return;
+  }
+
+  if (request.action === 'getBatchQueue') {
+    sendResponse(getBatchQueuePayload());
+    return;
+  }
+
+  if (request.action === 'removeBatchQueueItem') {
+    const { id } = request;
+    if (!id) {
+      sendResponse({ success: false, error: 'Missing queue item id.' });
+      return;
+    }
+    const removed = removeBatchQueueItem(id);
+    sendResponse({ success: removed, queueLength: batchQueue.length });
+    return;
+  }
+
+  if (request.action === 'clearBatchQueue') {
+    const cleared = clearBatchQueue();
+    sendResponse({ success: cleared, queueLength: batchQueue.length });
     return;
   }
 
@@ -1206,13 +1350,22 @@ chrome.tabs.onRemoved.addListener(tabId => {
     delete messageQueue[tabId];
   }
 
+  const before = batchQueue.length;
+  batchQueue = batchQueue.filter(item => item.tabId !== tabId);
+  if (batchQueue.length !== before) {
+    broadcastBatchUpdate('queueUpdated', {
+      message: batchQueue.length
+        ? `${batchQueue.length} batch job(s) still queued.`
+        : 'Queued jobs for closed tab were removed.',
+      level: 'info'
+    }, batchState.isRunning, true);
+  }
+
   if (batchState.isRunning && batchState.tabId === tabId) {
-    batchState.isRunning = false;
     batchState.cancelRequested = true;
     broadcastBatchUpdate('error', {
       message: 'Batch cancelled because the tab was closed.',
       level: 'error'
-    }, false);
-    resetBatchState();
+    }, false, true);
   }
 });

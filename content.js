@@ -177,67 +177,116 @@
             const pathParts = window.location.pathname.split('/');
             if (DEBUG_MODE) console.log('Devin: Detecting sidebar links using helper logic...');
 
-            const navButtons = getDevinSidebarButtons();
+            const wikiIndex = pathParts.indexOf('wiki');
+            let wikiBaseUrl = window.location.origin;
+            if (wikiIndex !== -1 && pathParts[wikiIndex + 2]) {
+              const basePath = pathParts.slice(0, wikiIndex + 3).join('/');
+              wikiBaseUrl += basePath;
+            }
 
-            if (navButtons.length > 0) {
-              const counters = navButtons.map((btn, index) => {
-                const rect = btn.getBoundingClientRect();
-                return {
-                  text: btn.getAttribute('aria-label').trim(),
-                  left: rect.left,
-                  element: btn,
-                  index: index
-                };
-              });
+            const orgTocEntries = getDevinOrgWikiTocEntries();
+            if (orgTocEntries.length > 0) {
+              sidebarLinks = orgTocEntries.map((entry) => ({
+                getAttribute: (attr) => {
+                  if (attr === 'href') return entry.href;
+                  if (attr === 'data-selected') return entry.selected ? 'true' : null;
+                  return null;
+                },
+                textContent: entry.text,
+                href: entry.href,
+                text: entry.text,
+                hierarchicalTitle: `${entry.prefix} ${entry.text}`,
+                isDevinButton: false
+              }));
 
-              // Calculate indentation baseline
-              const minLeft = Math.min(...counters.map(c => c.left));
-              const INDENT_THRESHOLD = 8;
-              let hierarchyStack = [0];
-
-              // Determine Base URL for Wiki
-              const wikiIndex = pathParts.indexOf('wiki');
-              let wikiBaseUrl = window.location.origin;
-
-              if (wikiIndex !== -1 && pathParts[wikiIndex + 2]) {
-                const basePath = pathParts.slice(0, wikiIndex + 3).join('/');
-                wikiBaseUrl += basePath;
+              if (DEBUG_MODE) {
+                console.log(`Devin: Org wiki link entries found: ${sidebarLinks.length}`);
               }
-
-              sidebarLinks = counters.map((item) => {
-                const offset = item.left - minLeft;
-                const level = offset < INDENT_THRESHOLD ? 0 : 1;
-
-                if (level > hierarchyStack.length - 1) {
-                  hierarchyStack.push(1);
-                } else if (level < hierarchyStack.length - 1) {
-                  while (hierarchyStack.length - 1 > level) {
-                    hierarchyStack.pop();
-                  }
-                  hierarchyStack[level]++;
-                } else {
-                  hierarchyStack[level]++;
+            } else {
+              const tocEntries = getDevinWikiTocEntries();
+              if (tocEntries.length > 0) {
+                let hierarchyStack = [0];
+                sidebarLinks = tocEntries.map((entry, index) => {
+                const level = entry.level;
+                while (hierarchyStack.length > level + 1) {
+                  hierarchyStack.pop();
                 }
-
-                const prefix = hierarchyStack.join('.');
+                while (hierarchyStack.length < level + 1) {
+                  hierarchyStack.push(0);
+                }
+                hierarchyStack[level]++;
+                const prefix = hierarchyStack.slice(0, level + 1).join('.');
                 const fullUrl = `${wikiBaseUrl}#${prefix}`;
+                const selected = isDevinTocButtonSelected(entry.button);
 
                 return {
-                  getAttribute: (attr) => (attr === 'href' ? fullUrl : null),
-                  textContent: item.text,
+                  getAttribute: (attr) => {
+                    if (attr === 'href') return fullUrl;
+                    if (attr === 'data-selected') return selected ? 'true' : null;
+                    return null;
+                  },
+                  textContent: entry.text,
                   href: fullUrl,
-                  text: item.text,
-                  hierarchicalTitle: `${prefix} ${item.text}`,
+                  text: entry.text,
+                  hierarchicalTitle: `${prefix} ${entry.text}`,
                   isDevinButton: true,
-                  buttonIndex: item.index
+                  buttonIndex: index
                 };
               });
 
               if (DEBUG_MODE) {
-                console.log(`Devin: Synthesized links found: ${sidebarLinks.length}`);
+                console.log(`Devin: TOC entries found: ${sidebarLinks.length}`);
               }
             } else {
-              if (DEBUG_MODE) console.log("Devin: No matching sidebar buttons found.");
+              const navButtons = getDevinSidebarButtonsLegacy();
+              if (navButtons.length > 0) {
+                const counters = navButtons.map((btn, index) => {
+                  const rect = btn.getBoundingClientRect();
+                  return {
+                    text: getDevinButtonLabel(btn),
+                    left: rect.left,
+                    element: btn,
+                    index: index
+                  };
+                });
+
+                const minLeft = Math.min(...counters.map(c => c.left));
+                const INDENT_THRESHOLD = 8;
+                let hierarchyStack = [0];
+
+                sidebarLinks = counters.map((item) => {
+                  const offset = item.left - minLeft;
+                  const level = offset < INDENT_THRESHOLD ? 0 : 1;
+
+                  while (hierarchyStack.length > level + 1) {
+                    hierarchyStack.pop();
+                  }
+                  while (hierarchyStack.length < level + 1) {
+                    hierarchyStack.push(0);
+                  }
+                  hierarchyStack[level]++;
+
+                  const prefix = hierarchyStack.slice(0, level + 1).join('.');
+                  const fullUrl = `${wikiBaseUrl}#${prefix}`;
+
+                  return {
+                    getAttribute: (attr) => (attr === 'href' ? fullUrl : null),
+                    textContent: item.text,
+                    href: fullUrl,
+                    text: item.text,
+                    hierarchicalTitle: `${prefix} ${item.text}`,
+                    isDevinButton: true,
+                    buttonIndex: item.index
+                  };
+                });
+
+                if (DEBUG_MODE) {
+                  console.log(`Devin: Legacy aria-label buttons found: ${sidebarLinks.length}`);
+                }
+              } else if (DEBUG_MODE) {
+                console.log('Devin: No matching sidebar buttons found.');
+              }
+            }
             }
           } else {
             sidebarLinks = Array.from(document.querySelectorAll('.border-r-border ul li a'));
@@ -353,7 +402,7 @@
       } else {
         // Fallback to text matching if index is missing or out of bounds
         buttonToClick = navButtons.find(
-          btn => btn.getAttribute('aria-label').trim() === targetText
+          btn => getDevinButtonLabel(btn) === targetText
         );
       }
 
@@ -362,7 +411,7 @@
 
         // If the button is already selected, we are already on the target page.
         // Skip the click and the 15-second polling delay to speed up extraction.
-        if (buttonToClick.getAttribute('data-selected') === 'true') {
+        if (isDevinTocButtonSelected(buttonToClick)) {
           if (DEBUG_MODE) console.log(`Devin: Already on page '${targetText}'. Skipping click.`);
           setTimeout(() => {
             chrome.runtime.sendMessage({ action: "contentScriptReady" });
@@ -396,7 +445,7 @@
           let readinessConfirmed = false;
 
           // 1. Check if the newly clicked button state changed to selected
-          if (buttonToClick && buttonToClick.getAttribute('data-selected') === 'true') {
+          if (buttonToClick && isDevinTocButtonSelected(buttonToClick)) {
             readinessConfirmed = true;
           }
 
@@ -444,38 +493,167 @@
     return false;
   });
 
+  function getDevinButtonLabel(btn) {
+    return (btn.getAttribute('aria-label') || btn.textContent || '').trim();
+  }
+
+  function isDevinTocButtonSelected(btn) {
+    if (btn.getAttribute('data-selected') === 'true') return true;
+    const cls = btn.className || '';
+    if (cls.includes('bg-[#212121]')) return true;
+    if (cls.includes('text-[#cbcbcb]') && !cls.includes('text-[#8f8f8f]')) return true;
+    return false;
+  }
+
+  function getDevinTocLevelFromLi(li) {
+    const style = li.getAttribute('style') || '';
+    const match = style.match(/padding-left:\s*(\d+)px/i);
+    const px = match ? parseInt(match[1], 10) : 0;
+    return Math.round(px / 12);
+  }
+
+  function getDevinWikiTocRoot() {
+    return document.querySelector('.wiki-content-container .border-r-border') ||
+      document.querySelector('.border-r-border');
+  }
+
+  function getDevinOrgWikiBasePath() {
+    const pathParts = window.location.pathname.split('/').filter(part => part.length > 0);
+    const wikiIndex = pathParts.indexOf('wiki');
+    if (wikiIndex === -1 || !pathParts[wikiIndex + 2]) return '';
+    return '/' + pathParts.slice(0, wikiIndex + 3).join('/');
+  }
+
+  function getDevinOrgWikiSidebarRoot() {
+    return document.querySelector('[data-slot="sidebar-content"]') ||
+      document.querySelector('[data-testid="sidebar"]');
+  }
+
+  function getDevinOrgWikiPageIdFromHref(href) {
+    const match = (href || '').match(/\/page\/([^?#/]+)/);
+    return match ? match[1] : '';
+  }
+
+  function getDevinOrgWikiLinkLabel(link) {
+    const ariaLabel = (link.getAttribute('aria-label') || '').trim();
+    if (ariaLabel) return ariaLabel;
+    const siblingText = link.parentElement?.querySelector('div')?.textContent?.trim();
+    if (siblingText) return siblingText;
+    return (link.textContent || '').trim();
+  }
+
+  function isDevinOrgWikiLinkSelected(link) {
+    return link.querySelector('[data-active="true"]') !== null ||
+      link.getAttribute('aria-current') === 'page';
+  }
+
+  function getDevinOrgWikiTocEntries() {
+    const sidebarRoot = getDevinOrgWikiSidebarRoot();
+    if (!sidebarRoot) return [];
+
+    const wikiBasePath = getDevinOrgWikiBasePath();
+    if (!wikiBasePath) return [];
+
+    const entries = [];
+    const seenHrefs = new Set();
+    const links = Array.from(sidebarRoot.querySelectorAll('a[href*="/page/"]'));
+
+    for (const link of links) {
+      const rawHref = link.getAttribute('href') || '';
+      if (!rawHref.includes('/page/')) continue;
+
+      const absHref = new URL(rawHref, window.location.href).href;
+      const pathname = new URL(absHref).pathname;
+      if (!pathname.startsWith(wikiBasePath + '/page/')) continue;
+      if (seenHrefs.has(absHref)) continue;
+      seenHrefs.add(absHref);
+
+      const text = getDevinOrgWikiLinkLabel(link);
+      if (!text || text === 'Back') continue;
+
+      const pageId = getDevinOrgWikiPageIdFromHref(absHref);
+      if (!pageId) continue;
+
+      entries.push({
+        link,
+        text,
+        href: absHref,
+        pageId,
+        prefix: pageId,
+        level: pageId.includes('.') ? pageId.split('.').length - 1 : 0,
+        selected: isDevinOrgWikiLinkSelected(link)
+      });
+    }
+
+    return entries;
+  }
+
+  function getDevinWikiTocEntries() {
+    const tocRoot = getDevinWikiTocRoot();
+    if (!tocRoot) return [];
+
+    const entries = [];
+    const listItems = Array.from(tocRoot.querySelectorAll('ul li'));
+    for (const li of listItems) {
+      const button = li.querySelector(':scope > button');
+      if (!button) continue;
+      const text = getDevinButtonLabel(button);
+      if (!text || text === 'Back') continue;
+      entries.push({
+        button,
+        li,
+        text,
+        level: getDevinTocLevelFromLi(li)
+      });
+    }
+    return entries;
+  }
+
   // Helper: Get strictly filtered Devin sidebar buttons for extraction and programmatic clicking
   function getDevinSidebarButtons() {
+    const tocEntries = getDevinWikiTocEntries();
+    if (tocEntries.length > 0) {
+      return tocEntries.map(entry => entry.button);
+    }
+    return getDevinSidebarButtonsLegacy();
+  }
+
+  function getDevinSidebarButtonsLegacy() {
     const pathParts = window.location.pathname.split('/');
+    const wikiScope = document.querySelector('.wiki-content-container') ||
+      document.querySelector('.border-r-border');
+    if (!wikiScope) return [];
+
     const mainContent = document.querySelector('.prose-main') ||
       document.querySelector('.prose') ||
       document.querySelector('article') ||
       document.querySelector('main');
 
-    const buttons = Array.from(document.querySelectorAll('button[aria-label]'));
+    const buttons = Array.from(wikiScope.querySelectorAll('button[aria-label]'));
 
-    // Extract Org Name from URL for exclusion (e.g. /org/philip-zheng/ -> Philip Zheng)
     const orgIndex = pathParts.indexOf('org');
     let orgName = '';
     if (orgIndex !== -1 && pathParts[orgIndex + 1]) {
       orgName = pathParts[orgIndex + 1].replace(/-/g, ' ').toLowerCase();
     }
 
-    // Security & Noise filters: Block potential destructive actions or generic UI elements
-    const exactIgnoredLabels = ['Sessions', 'Ask', 'Wiki', 'Review', 'Settings', 'Back', 'Copy', 'Pin', 'Unpin', 'Delete', 'Remove', 'Archive', 'Reset', 'Clear', 'Sign out'];
-    const partialIgnoredLabels = ['Close sidebar', 'Show more breadcrumbs', 'Add repo', 'New chat', 'Import repository', 'Create new', 'Copy code', 'Link copied!'];
+    const exactIgnoredLabels = [
+      'Sessions', 'Ask', 'Wiki', 'Review', 'Settings', 'Back', 'Copy', 'Pin', 'Unpin',
+      'Delete', 'Remove', 'Archive', 'Reset', 'Clear', 'Sign out', 'Search',
+      'All repos', 'Add repo', 'Edit wiki', 'Session', 'Support'
+    ];
+    const partialIgnoredLabels = [
+      'Close sidebar', 'Show more breadcrumbs', 'Add repo', 'New chat',
+      'Import repository', 'Create new', 'Copy code', 'Link copied!', 'Copy link'
+    ];
 
     return buttons.filter(btn => {
-      // 1. Layout checks: Must not be inside main content and must be on the left half of the screen
       if (mainContent && mainContent.contains(btn)) return false;
-      const rect = btn.getBoundingClientRect();
-      if (rect.left > window.innerWidth / 2) return false;
+      if (btn.closest('header')) return false;
+      if (btn.closest('[data-index]')) return false;
 
-      // 2. Semantics check: Check aria-label
-      const label = btn.getAttribute('aria-label');
-      if (!label) return false;
-
-      const text = label.trim();
+      const text = getDevinButtonLabel(btn);
+      if (!text) return false;
       if (exactIgnoredLabels.includes(text)) return false;
       if (partialIgnoredLabels.some(ignored => text.includes(ignored))) return false;
       if (orgName && text.toLowerCase().includes(orgName)) return false;

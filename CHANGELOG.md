@@ -6,6 +6,41 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 Version numbers match `manifest.json`.
 
+## [0.5.3] - 2026-07-03
+
+### Fixed
+
+- **Devin org-wiki batch discovery** — new `/org/.../wiki/.../page/N` sidebar uses link-based navigation in `[data-slot="sidebar-content"]`, not `.border-r-border` buttons. Batch download now finds all pages via real URLs (with `?branch=`) instead of reporting "No child pages were detected."
+
+## [0.5.2] - 2026-07-03
+
+### Changed
+
+- Version bump for extension reload after Devin wiki TOC discovery fix.
+
+## [0.5.1] - 2026-07-03
+
+### Fixed
+
+- **Devin wiki batch discovery** — wiki TOC navigation uses plain `<button>` text inside `.border-r-border ul`, not `button[aria-label]`. Batch download now finds all wiki pages (e.g. Overview, Architecture Patterns, nested sections) instead of only app chrome items like Search.
+
+## [0.5.0] - 2026-05-29
+
+### Added
+
+- **Batch operation queue** — queue multiple ZIP or single-file batch jobs while one is running; jobs run sequentially with per-item remove and clear-queue controls in the popup.
+- Popup **Batch queue** section showing the active job and waiting jobs.
+
+### Changed
+
+- **Recent batches** retention increased from 5 to 20 entries (80 MB per-entry cap unchanged).
+- Batch buttons stay enabled while a batch is running so additional jobs can be queued.
+- Cancel button label becomes **Cancel current batch** when other jobs are queued (queued jobs continue unless removed).
+
+### Note
+
+- The in-memory batch queue is lost if the extension service worker is reloaded (same as in-flight batch state today).
+
 ## [0.4.0] - 2026-05-29
 
 ### Added

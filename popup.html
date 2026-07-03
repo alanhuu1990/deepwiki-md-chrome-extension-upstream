@@ -24,6 +24,16 @@
       <button id="cancelBtn" class="cancel" style="display: none;">Cancel Batch Operation</button>
     </div>
     <div id="status"></div>
+    <section id="batchQueueSection" class="batch-queue" hidden>
+      <button type="button" id="batchQueueToggle" class="batch-queue-toggle" aria-expanded="true">
+        <span id="batchQueueToggleLabel">Batch queue</span>
+        <span id="batchQueueToggleIcon" class="batch-queue-toggle-icon">▼</span>
+      </button>
+      <div id="batchQueuePanel" class="batch-queue-panel">
+        <ul id="batchQueueList" class="batch-queue-list"></ul>
+        <button type="button" id="batchQueueClearBtn" class="batch-queue-clear">Clear queue</button>
+      </div>
+    </section>
     <section id="batchHistorySection" class="batch-history" hidden>
       <button type="button" id="batchHistoryToggle" class="batch-history-toggle" aria-expanded="true">
         <span>Recent batches</span>

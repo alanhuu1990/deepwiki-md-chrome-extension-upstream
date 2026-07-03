@@ -108,6 +108,125 @@ button.cancel:hover {
   color: #31708f;
 }
 
+.batch-queue {
+  margin-top: 12px;
+  border-top: 1px solid #e0e0e0;
+  padding-top: 8px;
+}
+
+.batch-queue-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  padding: 4px 0;
+  background: none;
+  border: none;
+  color: #333;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  text-align: left;
+}
+
+.batch-queue-toggle:hover {
+  background: none;
+  color: #0366d6;
+}
+
+.batch-queue-toggle-icon {
+  font-size: 10px;
+  color: #666;
+}
+
+.batch-queue-panel {
+  margin-top: 6px;
+}
+
+.batch-queue-panel.collapsed {
+  display: none;
+}
+
+.batch-queue-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 120px;
+  overflow-y: auto;
+}
+
+.batch-queue-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 6px 0;
+  border-bottom: 1px solid #eee;
+  font-size: 12px;
+}
+
+.batch-queue-item:last-child {
+  border-bottom: none;
+}
+
+.batch-queue-meta {
+  flex: 1;
+  min-width: 0;
+}
+
+.batch-queue-label {
+  font-weight: 600;
+  color: #333;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.batch-queue-details {
+  color: #666;
+  margin-top: 2px;
+  line-height: 1.3;
+}
+
+.batch-queue-actions {
+  display: flex;
+  flex-shrink: 0;
+  gap: 4px;
+}
+
+.batch-queue-mode {
+  display: inline-block;
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: #eef2f7;
+  color: #455a64;
+  font-size: 10px;
+  font-weight: 600;
+  margin-right: 4px;
+}
+
+button.batch-queue-remove {
+  padding: 4px 7px;
+  font-size: 11px;
+  background-color: #9e9e9e;
+  line-height: 1;
+}
+
+button.batch-queue-remove:hover {
+  background-color: #757575;
+}
+
+button.batch-queue-clear {
+  margin-top: 6px;
+  padding: 4px 10px;
+  font-size: 11px;
+  background-color: #9e9e9e;
+  width: 100%;
+}
+
+button.batch-queue-clear:hover {
+  background-color: #757575;
+}
+
 .batch-history {
   margin-top: 12px;
   border-top: 1px solid #e0e0e0;

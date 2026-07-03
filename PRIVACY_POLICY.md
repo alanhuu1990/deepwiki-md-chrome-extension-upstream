@@ -67,7 +67,7 @@ The Extension includes one third-party library:
 The Extension stores data locally on your device only when you complete a batch download (ZIP or single merged Markdown file):
 
 - Completed batch outputs are saved in **IndexedDB** so you can re-download them from the extension popup without re-running conversion
-- Up to **5** recent batch results are kept; older entries are removed automatically
+- Up to **20** recent batch results are kept; older entries are removed automatically
 - Archives larger than **80 MB** are not kept in history (the initial download still runs)
 - You can remove individual entries or clear all history from the popup
 - No cookies are created

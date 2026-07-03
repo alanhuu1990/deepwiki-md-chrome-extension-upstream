@@ -2,7 +2,7 @@
 const BATCH_HISTORY_DB_NAME = 'deepwiki-batch-history';
 const BATCH_HISTORY_DB_VERSION = 1;
 const BATCH_HISTORY_STORE = 'archives';
-const BATCH_HISTORY_MAX_ENTRIES = 5;
+const BATCH_HISTORY_MAX_ENTRIES = 20;
 const BATCH_HISTORY_MAX_BYTES = 80 * 1024 * 1024;
 
 const batchHistory = {

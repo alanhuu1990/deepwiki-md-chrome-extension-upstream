@@ -41,7 +41,7 @@ Three message endpoints — popup ↔ background ↔ content script — coordina
 - `background.js` (service worker) — batch orchestration, per-tab message queue, SPA navigation, ZIP/file generation. Loads `lib/jszip.min.js`, `utils.js`, and `batchHistory.js` via `importScripts`.
 - `batchHistory.js` — IndexedDB persistence for completed batch ZIP / single-file outputs (re-download without re-converting).
 - `content.js` — DOM → Markdown conversion (`processNode`), sidebar extraction (`extractAllPages`), Devin button clicks (`clickDevinButton`). Wrapped in an IIFE with a version guard (`window.__deepwikiVersion`) so re-injection cleanly supersedes the prior instance.
-- `popup.js` / `popup.html` — UI with three buttons + cancel; defers re-injection to background via `ensureContentScript`.
+- `popup.js` / `popup.html` — UI with three buttons + cancel + batch queue; defers re-injection to background via `ensureContentScript`.
 - `utils.js` — shared `sanitizeName` and `isValidDeepWikiUrl` (loaded by both background and popup).
 
 ### Key invariants
@@ -66,7 +66,9 @@ Three message endpoints — popup ↔ background ↔ content script — coordina
 
 **Filenames.** ZIP mode uses page head/current title (`sanitizeFolderName`). Single-file merge: DeepWiki uses `<headTitle>[-<lastIndexedDate>].md`; Devin uses `Devin-<org>-<project>[-<lastIndexedDate>].md`. Sanitization in `sanitizeName` strips `\/:*?"<>|`, collapses whitespace and runs of `-`, and trims leading/trailing `-`. Within a single batch, `getUniqueFileName` appends `-1`, `-2`, … to deduplicate.
 
-**Batch download history.** After a successful batch ZIP or single-file merge, `background.js` saves the output to IndexedDB (`batchHistory.js`, DB `deepwiki-batch-history`) *before* triggering `chrome.downloads`, so dismissing the save dialog still leaves a recoverable copy. Retention: max 5 entries (FIFO by `completedAt`), skip persist above 80 MB per entry (download still proceeds). Popup **Recent batches** lists metadata and supports re-download / per-entry remove / clear all. Not used for single-page `downloadPageZip`.
+**Batch download history.** After a successful batch ZIP or single-file merge, `background.js` saves the output to IndexedDB (`batchHistory.js`, DB `deepwiki-batch-history`) *before* triggering `chrome.downloads`, so dismissing the save dialog still leaves a recoverable copy. Retention: max 20 entries (FIFO by `completedAt`), skip persist above 80 MB per entry (download still proceeds). Popup **Recent batches** lists metadata and supports re-download / per-entry remove / clear all. Not used for single-page `downloadPageZip`.
+
+**Batch operation queue.** `batchQueue[]` in `background.js` holds up to 20 waiting jobs `{ id, tabId, mode, url, label, enqueuedAt }`. `enqueueOrStartBatch` starts immediately when idle or enqueues when `batchState.isRunning`. Page extraction runs at job start (not enqueue). `processNextInQueue()` runs in the `finally` block after each job (after `restoreOriginalPage`). Cancel affects only the active job; queued jobs are removed individually or via `clearBatchQueue`. Closing a tab removes its queued items; closing the active batch tab sets `cancelRequested` and lets the running job's `finally` advance the queue. Queue state is in-memory only (lost on service worker reload).
 
 ### Message contract (background ↔ content)
 
@@ -78,8 +80,9 @@ Three message endpoints — popup ↔ background ↔ content script — coordina
 | `extractAllPages` | bg → cs | — | Wrapped in `setTimeout(…, 0)` to force async — callers rely on `return true` keeping the channel open |
 | `clickDevinButton` | bg → cs | `{ buttonText, buttonIndex }` | `buttonIndex` is authoritative; `buttonText` is fallback |
 | `pageLoaded` / `tabActivated` | bg → cs | — | Liveness pings on tab updates; cs must `sendResponse({ received: true })` |
-| `startBatch` / `startBatchSingleFile` / `cancelBatch` / `getBatchStatus` | popup → bg | `{ tabId? }` | |
-| `batchUpdate` | bg → popup | progress payload | Broadcast; popup also calls `getBatchStatus` on open to recover state |
+| `startBatch` / `startBatchSingleFile` / `cancelBatch` / `getBatchStatus` | popup → bg | `{ tabId? }` | Start returns `{ success, queued?, position?, label?, total?, folderName?, fileName? }` |
+| `getBatchQueue` / `removeBatchQueueItem` / `clearBatchQueue` | popup → bg | `{ id? }` | Queue management; `getBatchQueue` returns `{ success, running, queueLength, queue[], activeJob }` |
+| `batchUpdate` | bg → popup | progress payload | Broadcast; includes `queue`/`queueLength`/`activeJob` on structural events; popup also calls `getBatchStatus` on open |
 | `ensureContentScript` | popup → bg | `{ tabId }` | Popup delegates re-injection here instead of doing it itself |
 | `downloadPageZip` | popup → bg | `{ markdown, assets[], zipFileName, mdFileName }` | Single-page download with diagram assets; builds ZIP via JSZip |
 | `getBatchHistory` | popup → bg | — | `{ success, entries[] }` metadata only (no payloads) |
